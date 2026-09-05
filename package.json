@@ -1,1 +1,12 @@
-
+{
+  "name": "naxybot",
+  "version": "1.0.0",
+  "description": "Minecraft AI Bot for Naxy-Server",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "mineflayer": "^4.35.0"
+  }
+}
