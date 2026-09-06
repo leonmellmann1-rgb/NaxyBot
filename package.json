@@ -1,15 +1,16 @@
 {
   "name": "naxybot",
   "version": "1.0.0",
-  "description": "Minecraft AI Bot for Naxy-Server",
+  "description": "Naxy Minecraft AI Companion",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "mineflayer": "^4.35.0",
-    "mineflayer-pathfinder": "^2.4.5",
-    "minecraft-data": "^3.100.0",
-    "openai": "^5.0.0"
+    "mineflayer-pathfinder": "latest",
+    "mineflayer-collectblock": "latest",
+    "mineflayer-pvp": "latest",
+    "minecraft-data": "latest"
   }
 }
