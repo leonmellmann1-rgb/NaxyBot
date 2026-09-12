@@ -1,7 +1,7 @@
 {
   "name": "naxybot",
-  "version": "3.0.0",
-  "description": "Naxy intelligent Minecraft companion",
+  "version": "4.0.0",
+  "description": "Naxy intelligent Minecraft farming companion",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -9,8 +9,8 @@
   "dependencies": {
     "mineflayer": "latest",
     "mineflayer-pathfinder": "latest",
-    "mineflayer-collectblock": "latest",
     "mineflayer-pvp": "latest",
+    "mineflayer-tool": "latest",
     "minecraft-data": "latest",
     "openai": "latest"
   }
