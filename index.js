@@ -12,12 +12,13 @@ const toolPlugin = require('mineflayer-tool').plugin
 
 const {
   GoalFollow,
-  GoalNear
+  GoalNear,
+  GoalLookAtBlock
 } = goals
 
 
 // ======================================================
-// EINSTELLUNGEN
+// OPENAI
 // ======================================================
 
 const openai = new OpenAI({
@@ -30,21 +31,50 @@ const AI_MODEL =
 const BOT_OWNER =
   process.env.BOT_OWNER || ''
 
+// Standard AUS, weil wir vorher den
+// chat_validation_failed Fehler hatten.
+const BOT_CHAT =
+  String(process.env.BOT_CHAT || 'false')
+    .toLowerCase() === 'true'
+
 
 // ======================================================
-// BOT STARTEN
+// MINECRAFT BOT
 // ======================================================
 
 const bot = mineflayer.createBot({
-  host: process.env.MC_HOST,
-  port: Number(process.env.MC_PORT || 25565),
 
-  username: process.env.MC_USERNAME,
-  auth: 'microsoft',
+  host:
+    process.env.MC_HOST,
 
-  // Microsoft Login bleibt im Railway Volume gespeichert
-  profilesFolder: '/app/auth'
+  port:
+    Number(
+      process.env.MC_PORT || 25565
+    ),
+
+  username:
+    process.env.MC_USERNAME,
+
+  auth:
+    'microsoft',
+
+  // WICHTIG:
+  // Keine automatische Versionserkennung mehr.
+  version:
+    '1.21.11',
+
+  // Railway Volume für Microsoft Login
+  profilesFolder:
+    '/app/auth',
+
+  onMsaCode: data => {
+    console.log(
+      '[MICROSOFT LOGIN]',
+      data
+    )
+  }
 })
+
 
 bot.loadPlugin(pathfinder)
 bot.loadPlugin(pvp)
@@ -55,57 +85,40 @@ bot.loadPlugin(toolPlugin)
 // STATUS
 // ======================================================
 
-let mcData = null
 let movements = null
 
-let currentTask = 'nichts'
 let busy = false
 
-let protectionEnabled = false
-let protectedPlayer = null
+let currentTask =
+  'nichts'
 
-let combatActive = false
-let combatTarget = null
-let taskBeforeCombat = null
-
-let eating = false
-
-let currentFarmTask = null
-
-let survivalLoop = null
+let currentFarmTask =
+  null
 
 
-// ======================================================
-// START
-// ======================================================
+let protectionEnabled =
+  false
 
-bot.once('spawn', () => {
+let protectedPlayer =
+  null
 
-  mcData = require('minecraft-data')(bot.version)
 
-  movements = new Movements(bot, mcData)
+let combatActive =
+  false
 
-  movements.canDig = false
+let combatTarget =
+  null
 
-  bot.pathfinder.setMovements(movements)
 
-  console.log('')
-  console.log('==========================================')
-  console.log('        NAXY AI V4 IST ONLINE')
-  console.log('==========================================')
-  console.log('KI:                 AN')
-  console.log('SMART FARMING:      AN')
-  console.log('AUTO TOOL:           AN')
-  console.log('SELBSTSCHUTZ:        IMMER AN')
-  console.log('SPIELERSCHUTZ:       BEREIT')
-  console.log('AUTO ESSEN:          AN')
-  console.log('FARM RESUME:         AN')
-  console.log('ITEM DROP:           AN')
-  console.log('==========================================')
-  console.log('')
+let eating =
+  false
 
-  startSurvivalSystem()
-})
+let dodgingCreeper =
+  false
+
+
+let survivalLoop =
+  null
 
 
 // ======================================================
@@ -113,17 +126,78 @@ bot.once('spawn', () => {
 // ======================================================
 
 function sleep(ms) {
-  return new Promise(resolve =>
-    setTimeout(resolve, ms)
+
+  return new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        ms
+      )
   )
 }
 
 
-function isAllowedPlayer(username) {
+function log(
+  section,
+  text
+) {
+
+  console.log(
+    `[${section}] ${text}`
+  )
+}
+
+
+// ======================================================
+// CHAT AUSGABE
+// ======================================================
+
+async function safeSay(text) {
+
+  if (!BOT_CHAT) {
+
+    // Solange Minecraft Chat Probleme macht,
+    // schreibt der Bot nur in Railway Logs.
+
+    log(
+      'BOT',
+      text
+    )
+
+    return
+  }
+
+
+  try {
+
+    bot.chat(
+      String(text)
+        .slice(0, 200)
+    )
+
+  } catch (error) {
+
+    log(
+      'CHAT FEHLER',
+      error.message
+    )
+  }
+}
+
+
+// ======================================================
+// SPIELER BERECHTIGUNG
+// ======================================================
+
+function isAllowedPlayer(
+  username
+) {
 
   if (!BOT_OWNER) {
+
     return true
   }
+
 
   return (
     username.toLowerCase() ===
@@ -132,111 +206,28 @@ function isAllowedPlayer(username) {
 }
 
 
-function getPlayer(username) {
+// ======================================================
+// SPIELER FINDEN
+// ======================================================
+
+function getPlayer(
+  username
+) {
 
   const player =
     bot.players[username]
+
 
   if (
     !player ||
     !player.entity
   ) {
 
-    console.log(
-      `[SPIELER] ${username} ist nicht sichtbar.`
-    )
-
     return null
   }
 
+
   return player
-}
-
-
-// ======================================================
-// BOT STATUS FÜR KI
-// ======================================================
-
-function getBotState(username) {
-
-  const player =
-    bot.players[username]?.entity
-
-  const inventory =
-    bot.inventory
-      .items()
-      .slice(0, 30)
-      .map(item =>
-        `${item.name} x${item.count}`
-      )
-      .join(', ')
-
-  const nearby =
-    Object.values(bot.entities)
-      .filter(entity => {
-
-        if (!entity.position)
-          return false
-
-        if (entity === bot.entity)
-          return false
-
-        return (
-          bot.entity.position.distanceTo(
-            entity.position
-          ) <= 16
-        )
-      })
-      .slice(0, 20)
-      .map(entity => {
-
-        const name =
-          entity.username ||
-          entity.name ||
-          entity.displayName ||
-          entity.type
-
-        const distance =
-          bot.entity.position
-            .distanceTo(entity.position)
-            .toFixed(1)
-
-        return `${name} (${distance} Blöcke)`
-      })
-      .join(', ')
-
-  return `
-BOT STATUS:
-
-Leben: ${bot.health}/20
-Hunger: ${bot.food}/20
-
-Position:
-X ${Math.floor(bot.entity.position.x)}
-Y ${Math.floor(bot.entity.position.y)}
-Z ${Math.floor(bot.entity.position.z)}
-
-Aufgabe:
-${currentTask}
-
-Farmt gerade:
-${currentFarmTask ? 'JA' : 'NEIN'}
-
-Im Kampf:
-${combatActive ? 'JA' : 'NEIN'}
-
-Spielerschutz:
-${protectionEnabled ? 'AN' : 'AUS'}
-
-Spieler sichtbar:
-${player ? 'JA' : 'NEIN'}
-
-Inventar:
-${inventory || 'leer'}
-
-Umgebung:
-${nearby || 'nichts Besonderes'}
-`
 }
 
 
@@ -244,118 +235,608 @@ ${nearby || 'nichts Besonderes'}
 // FEINDLICHE MOBS
 // ======================================================
 
-const hostileMobs = [
-  'zombie',
-  'zombie_villager',
-  'skeleton',
-  'spider',
-  'cave_spider',
-  'creeper',
-  'drowned',
-  'husk',
-  'stray',
-  'witch',
-  'pillager',
-  'vindicator',
-  'ravager',
-  'slime',
-  'magma_cube',
-  'phantom',
-  'silverfish',
-  'endermite',
-  'blaze',
-  'ghast',
-  'warden',
-  'hoglin',
-  'zoglin',
-  'piglin_brute'
-]
+const hostileMobs =
+  new Set([
+
+    'zombie',
+    'zombie_villager',
+
+    'skeleton',
+    'stray',
+    'bogged',
+
+    'spider',
+    'cave_spider',
+
+    'creeper',
+
+    'drowned',
+    'husk',
+
+    'witch',
+
+    'pillager',
+    'vindicator',
+    'evoker',
+
+    'ravager',
+    'vex',
+
+    'slime',
+    'magma_cube',
+
+    'phantom',
+
+    'silverfish',
+    'endermite',
+
+    'blaze',
+    'ghast',
+
+    'warden',
+
+    'hoglin',
+    'zoglin',
+
+    'piglin_brute',
+
+    'guardian',
+    'elder_guardian',
+
+    'shulker'
+  ])
 
 
-function getEntityName(entity) {
+function entityName(
+  entity
+) {
 
   return String(
+
     entity?.name ||
+
     entity?.displayName ||
+
     ''
+
   ).toLowerCase()
 }
 
 
-function isHostile(entity) {
+function isHostile(
+  entity
+) {
 
-  if (!entity)
+  if (
+    !entity ||
+    !entity.position
+  ) {
+
     return false
+  }
+
 
   const name =
-    getEntityName(entity)
+    entityName(
+      entity
+    )
 
-  return hostileMobs.some(
-    hostile =>
-      name.includes(hostile)
+
+  if (
+    hostileMobs.has(name)
+  ) {
+
+    return true
+  }
+
+
+  return (
+    [...hostileMobs]
+      .some(
+        hostile =>
+          name.includes(
+            hostile
+          )
+      )
   )
 }
 
 
 // ======================================================
-// BESTE WAFFE
+// RESSOURCEN
 // ======================================================
 
-async function equipBestWeapon() {
+const resources = {
 
-  const priorities = [
-    'netherite_sword',
-    'diamond_sword',
-    'iron_sword',
-    'stone_sword',
-    'golden_sword',
-    'wooden_sword',
+  holz: [
 
-    'netherite_axe',
-    'diamond_axe',
-    'iron_axe',
-    'stone_axe',
-    'golden_axe',
-    'wooden_axe'
+    'oak_log',
+    'spruce_log',
+    'birch_log',
+    'jungle_log',
+    'acacia_log',
+    'dark_oak_log',
+    'mangrove_log',
+    'cherry_log',
+    'pale_oak_log'
+  ],
+
+
+  eichenholz: [
+    'oak_log'
+  ],
+
+
+  fichtenholz: [
+    'spruce_log'
+  ],
+
+
+  birkenholz: [
+    'birch_log'
+  ],
+
+
+  sand: [
+
+    'sand',
+    'red_sand'
+  ],
+
+
+  erde: [
+
+    'dirt',
+    'grass_block'
+  ],
+
+
+  kies: [
+    'gravel'
+  ],
+
+
+  stein: [
+    'stone'
+  ],
+
+
+  kohle: [
+
+    'coal_ore',
+    'deepslate_coal_ore'
+  ],
+
+
+  eisen: [
+
+    'iron_ore',
+    'deepslate_iron_ore'
+  ],
+
+
+  kupfer: [
+
+    'copper_ore',
+    'deepslate_copper_ore'
+  ],
+
+
+  gold: [
+
+    'gold_ore',
+    'deepslate_gold_ore'
+  ],
+
+
+  redstone: [
+
+    'redstone_ore',
+    'deepslate_redstone_ore'
+  ],
+
+
+  lapis: [
+
+    'lapis_ore',
+    'deepslate_lapis_ore'
+  ],
+
+
+  diamanten: [
+
+    'diamond_ore',
+    'deepslate_diamond_ore'
+  ],
+
+
+  smaragde: [
+
+    'emerald_ore',
+    'deepslate_emerald_ore'
   ]
+}
 
-  for (
-    const weaponName
-    of priorities
-  ) {
 
-    const weapon =
-      bot.inventory
-        .items()
-        .find(
-          item =>
-            item.name === weaponName
-        )
+// ======================================================
+// WAS BEIM ABBAU INS INVENTAR KOMMT
+// ======================================================
 
-    if (!weapon)
-      continue
+const resourceDrops = {
 
-    try {
+  holz: [
 
-      await bot.equip(
-        weapon,
-        'hand'
-      )
+    'oak_log',
+    'spruce_log',
+    'birch_log',
+    'jungle_log',
+    'acacia_log',
+    'dark_oak_log',
+    'mangrove_log',
+    'cherry_log',
+    'pale_oak_log'
+  ],
 
-      console.log(
-        `[HOTBAR] Waffe: ${weapon.name}`
-      )
 
-      return true
+  eichenholz: [
+    'oak_log'
+  ],
 
-    } catch (_) {}
+
+  fichtenholz: [
+    'spruce_log'
+  ],
+
+
+  birkenholz: [
+    'birch_log'
+  ],
+
+
+  sand: [
+
+    'sand',
+    'red_sand'
+  ],
+
+
+  erde: [
+    'dirt'
+  ],
+
+
+  kies: [
+    'gravel'
+  ],
+
+
+  stein: [
+
+    'cobblestone',
+    'stone'
+  ],
+
+
+  kohle: [
+    'coal'
+  ],
+
+
+  eisen: [
+
+    'raw_iron',
+    'iron_ingot'
+  ],
+
+
+  kupfer: [
+
+    'raw_copper',
+    'copper_ingot'
+  ],
+
+
+  gold: [
+
+    'raw_gold',
+    'gold_ingot'
+  ],
+
+
+  redstone: [
+    'redstone'
+  ],
+
+
+  lapis: [
+    'lapis_lazuli'
+  ],
+
+
+  diamanten: [
+    'diamond'
+  ],
+
+
+  smaragde: [
+    'emerald'
+  ]
+}
+
+
+// ======================================================
+// RESSOURCEN NAMEN VERSTEHEN
+// ======================================================
+
+function normalizeResource(
+  resource
+) {
+
+  const name =
+    String(
+      resource || ''
+    )
+      .toLowerCase()
+      .trim()
+
+
+  const aliases = {
+
+    diamant:
+      'diamanten',
+
+    dia:
+      'diamanten',
+
+    dias:
+      'diamanten',
+
+    diamond:
+      'diamanten',
+
+    diamonds:
+      'diamanten',
+
+
+    smaragd:
+      'smaragde',
+
+    emerald:
+      'smaragde',
+
+    emeralds:
+      'smaragde',
+
+
+    iron:
+      'eisen',
+
+    'iron ore':
+      'eisen',
+
+
+    coal:
+      'kohle',
+
+
+    copper:
+      'kupfer',
+
+
+    wood:
+      'holz',
+
+    log:
+      'holz',
+
+    logs:
+      'holz',
+
+
+    oak:
+      'eichenholz',
+
+    'oak wood':
+      'eichenholz',
+
+
+    spruce:
+      'fichtenholz',
+
+
+    birch:
+      'birkenholz',
+
+
+    stone:
+      'stein',
+
+
+    dirt:
+      'erde',
+
+
+    gravel:
+      'kies'
   }
 
-  console.log(
-    '[HOTBAR] Keine Waffe - kämpfe mit der Hand.'
-  )
 
-  return false
+  return (
+    aliases[name] ||
+    name
+  )
+}
+
+
+// ======================================================
+// ITEMS ZÄHLEN
+// ======================================================
+
+function countResource(
+  resource
+) {
+
+  const name =
+    normalizeResource(
+      resource
+    )
+
+
+  const allowed =
+    resourceDrops[name] || []
+
+
+  return (
+    bot.inventory
+      .items()
+
+      .filter(
+        item =>
+          allowed.includes(
+            item.name
+          )
+      )
+
+      .reduce(
+        (
+          total,
+          item
+        ) =>
+          total +
+          item.count,
+
+        0
+      )
+  )
+}
+
+
+// ======================================================
+// BOT STATUS FÜR KI
+// ======================================================
+
+function getBotState(
+  username
+) {
+
+  const player =
+    getPlayer(
+      username
+    )?.entity
+
+
+  const inventory =
+
+    bot.inventory
+      .items()
+
+      .slice(
+        0,
+        30
+      )
+
+      .map(
+        item =>
+          `${item.name} x${item.count}`
+      )
+
+      .join(', ') ||
+
+    'leer'
+
+
+  const nearby =
+
+    Object.values(
+      bot.entities
+    )
+
+      .filter(
+        entity => {
+
+          if (
+            !entity?.position
+          ) {
+
+            return false
+          }
+
+
+          if (
+            entity ===
+            bot.entity
+          ) {
+
+            return false
+          }
+
+
+          return (
+
+            bot.entity.position
+              .distanceTo(
+                entity.position
+              ) <= 16
+          )
+        }
+      )
+
+      .slice(
+        0,
+        20
+      )
+
+      .map(
+        entity =>
+
+          `${
+            entity.username ||
+            entity.name ||
+            entity.type
+          } (${
+            bot.entity.position
+              .distanceTo(
+                entity.position
+              )
+              .toFixed(1)
+          } Blöcke)`
+      )
+
+      .join(', ') ||
+
+    'nichts Besonderes'
+
+
+  return `
+Leben: ${bot.health}/20
+Hunger: ${bot.food}/20
+
+Position:
+${Math.floor(bot.entity.position.x)}
+${Math.floor(bot.entity.position.y)}
+${Math.floor(bot.entity.position.z)}
+
+Aufgabe:
+${currentTask}
+
+Farmt:
+${currentFarmTask ? 'ja' : 'nein'}
+
+Im Kampf:
+${combatActive ? 'ja' : 'nein'}
+
+Spielerschutz:
+${protectionEnabled ? 'an' : 'aus'}
+
+Auftraggeber sichtbar:
+${player ? 'ja' : 'nein'}
+
+Inventar:
+${inventory}
+
+In der Nähe:
+${nearby}
+`
 }
 
 
@@ -364,190 +845,531 @@ async function equipBestWeapon() {
 // ======================================================
 
 const foodPriority = [
-  'golden_carrot',
+
   'cooked_beef',
+
   'cooked_porkchop',
+
   'cooked_mutton',
+
   'cooked_chicken',
+
   'cooked_rabbit',
+
   'bread',
+
   'baked_potato',
+
   'carrot',
+
   'apple'
 ]
 
 
 async function eatFood() {
 
-  if (eating)
+  if (
+    eating ||
+    combatActive
+  ) {
+
     return false
+  }
+
 
   const food =
+
     foodPriority
-      .map(name =>
-        bot.inventory
-          .items()
-          .find(
-            item =>
-              item.name === name
-          )
+
+      .map(
+        name =>
+          bot.inventory
+            .items()
+            .find(
+              item =>
+                item.name ===
+                name
+            )
       )
-      .find(Boolean)
 
-  if (!food)
+      .find(
+        Boolean
+      )
+
+
+  if (!food) {
+
     return false
+  }
 
-  eating = true
+
+  eating =
+    true
+
 
   try {
-
-    console.log(
-      `[SURVIVAL] Esse ${food.name}`
-    )
 
     await bot.equip(
       food,
       'hand'
     )
 
+
+    log(
+      'SURVIVAL',
+      `Esse ${food.name}`
+    )
+
+
     await bot.consume()
 
-    console.log(
-      '[SURVIVAL] Essen fertig.'
-    )
 
     return true
 
+
   } catch (error) {
 
-    console.log(
-      '[ESSEN FEHLER]',
+    log(
+      'ESSEN FEHLER',
       error.message
     )
 
+
     return false
+
 
   } finally {
 
-    eating = false
+    eating =
+      false
   }
 }
 
 
 // ======================================================
-// BEDROHUNG SUCHEN
+// BESTE WAFFE
+// ======================================================
+
+const weaponPriority = [
+
+  'netherite_sword',
+
+  'diamond_sword',
+
+  'iron_sword',
+
+  'stone_sword',
+
+  'wooden_sword',
+
+
+  'netherite_axe',
+
+  'diamond_axe',
+
+  'iron_axe',
+
+  'stone_axe',
+
+  'wooden_axe'
+]
+
+
+async function equipBestWeapon() {
+
+  for (
+    const weaponName
+    of weaponPriority
+  ) {
+
+    const weapon =
+
+      bot.inventory
+        .items()
+
+        .find(
+          item =>
+            item.name ===
+            weaponName
+        )
+
+
+    if (!weapon) {
+
+      continue
+    }
+
+
+    try {
+
+      await bot.equip(
+        weapon,
+        'hand'
+      )
+
+
+      log(
+        'HOTBAR',
+        `Waffe: ${weapon.name}`
+      )
+
+
+      return true
+
+
+    } catch (_) {}
+  }
+
+
+  return false
+}
+
+
+// ======================================================
+// GEFAHR FINDEN
 // ======================================================
 
 function findThreat() {
 
-  let threat = null
-  let bestDistance = Infinity
-
   const protectedEntity =
+
     protectedPlayer
-      ? bot.players[protectedPlayer]?.entity
+
+      ? getPlayer(
+          protectedPlayer
+        )?.entity
+
       : null
+
+
+  let bestThreat =
+    null
+
+
+  let bestScore =
+    Infinity
+
 
   for (
     const entity
-    of Object.values(bot.entities)
+    of Object.values(
+      bot.entities
+    )
   ) {
 
-    if (!isHostile(entity))
-      continue
-
-    if (!entity.position)
-      continue
-
-    const distanceToBot =
-      bot.entity.position.distanceTo(
-        entity.position
-      )
-
-    let danger =
-      distanceToBot <= 8
-
     if (
-      protectionEnabled &&
-      protectedEntity
+      !isHostile(
+        entity
+      )
     ) {
 
-      const distanceToPlayer =
-        protectedEntity.position.distanceTo(
+      continue
+    }
+
+
+    const distanceBot =
+
+      bot.entity.position
+        .distanceTo(
           entity.position
         )
 
-      if (distanceToPlayer <= 9) {
-        danger = true
-      }
-    }
 
-    if (!danger)
-      continue
+    const distancePlayer =
+
+      protectedEntity
+
+        ? protectedEntity.position
+            .distanceTo(
+              entity.position
+            )
+
+        : Infinity
+
+
+    const threatensBot =
+      distanceBot <= 8
+
+
+    const threatensPlayer =
+
+      protectionEnabled &&
+      distancePlayer <= 9
+
 
     if (
-      distanceToBot <
-      bestDistance
+      !threatensBot &&
+      !threatensPlayer
     ) {
 
-      threat = entity
-      bestDistance = distanceToBot
+      continue
+    }
+
+
+    const score =
+      Math.min(
+        distanceBot,
+        distancePlayer
+      )
+
+
+    if (
+      score <
+      bestScore
+    ) {
+
+      bestThreat =
+        entity
+
+      bestScore =
+        score
     }
   }
 
-  return threat
+
+  return bestThreat
 }
 
 
 // ======================================================
-// KAMPF STARTEN
+// CREEPER AUSWEICHEN
 // ======================================================
 
-async function startCombat(enemy) {
+async function dodgeCreeper(
+  creeper
+) {
 
   if (
-    !enemy ||
-    !enemy.isValid
+    dodgingCreeper ||
+    !creeper?.position
   ) {
+
     return
   }
+
+
+  dodgingCreeper =
+    true
+
+
+  try {
+
+    bot.pvp.stop()
+
+
+    try {
+
+      bot.stopDigging()
+
+    } catch (_) {}
+
+
+    bot.pathfinder
+      .setGoal(
+        null
+      )
+
+
+    const position =
+      bot.entity.position
+
+
+    const dx =
+      position.x -
+      creeper.position.x
+
+
+    const dz =
+      position.z -
+      creeper.position.z
+
+
+    const length =
+      Math.max(
+        Math.sqrt(
+          dx * dx +
+          dz * dz
+        ),
+        0.1
+      )
+
+
+    const safeX =
+      Math.floor(
+
+        position.x +
+
+        (
+          dx /
+          length
+        ) * 8
+      )
+
+
+    const safeZ =
+      Math.floor(
+
+        position.z +
+
+        (
+          dz /
+          length
+        ) * 8
+      )
+
+
+    const safeY =
+      Math.floor(
+        position.y
+      )
+
+
+    log(
+      'SURVIVAL',
+      'Creeper zu nah - gehe auf Abstand'
+    )
+
+
+    await bot.pathfinder.goto(
+
+      new GoalNear(
+        safeX,
+        safeY,
+        safeZ,
+        2
+      )
+    )
+
+
+  } catch (_) {
+
+    bot.setControlState(
+      'back',
+      true
+    )
+
+
+    await sleep(
+      900
+    )
+
+
+    bot.setControlState(
+      'back',
+      false
+    )
+
+
+  } finally {
+
+    dodgingCreeper =
+      false
+  }
+}
+
+
+// ======================================================
+// KAMPF
+// ======================================================
+
+async function startCombat(
+  enemy
+) {
+
+  if (
+    !enemy?.isValid ||
+    !enemy.position
+  ) {
+
+    return
+  }
+
+
+  const name =
+    entityName(
+      enemy
+    )
+
+
+  const distance =
+
+    bot.entity.position
+      .distanceTo(
+        enemy.position
+      )
+
+
+  // Creeper nicht stumpf umarmen :D
+
+  if (
+    name.includes(
+      'creeper'
+    ) &&
+    distance <= 4.5
+  ) {
+
+    await dodgeCreeper(
+      enemy
+    )
+
+    return
+  }
+
 
   if (
     combatActive &&
-    combatTarget &&
-    combatTarget.id === enemy.id
+    combatTarget?.id ===
+    enemy.id
   ) {
+
     return
   }
 
-  if (!combatActive) {
 
-    taskBeforeCombat =
-      currentTask
-  }
+  combatActive =
+    true
 
-  combatActive = true
-  combatTarget = enemy
 
-  bot.pathfinder.setGoal(null)
+  combatTarget =
+    enemy
 
-  currentTask =
-    `Selbstverteidigung gegen ${getEntityName(enemy)}`
 
-  console.log(
-    `[SURVIVAL] Gefahr: ${getEntityName(enemy)}`
+  // Farming wird NICHT gelöscht.
+  // Nur kurz unterbrochen.
+
+  try {
+
+    bot.stopDigging()
+
+  } catch (_) {}
+
+
+  bot.pathfinder
+    .setGoal(
+      null
+    )
+
+
+  log(
+    'SURVIVAL',
+    `Verteidige mich gegen ${name}`
   )
+
 
   try {
 
     await equipBestWeapon()
 
-    bot.pvp.attack(enemy)
+
+    bot.pvp.attack(
+      enemy
+    )
+
 
   } catch (error) {
 
-    console.log(
-      '[KAMPF FEHLER]',
+    log(
+      'KAMPF FEHLER',
       error.message
     )
   }
@@ -555,63 +1377,90 @@ async function startCombat(enemy) {
 
 
 // ======================================================
-// KAMPF BEENDEN
+// KAMPF FERTIG
 // ======================================================
 
 function finishCombat() {
 
-  if (!combatActive)
+  if (!combatActive) {
+
     return
+  }
+
 
   bot.pvp.stop()
 
-  combatActive = false
-  combatTarget = null
 
-  if (taskBeforeCombat) {
+  combatActive =
+    false
+
+
+  combatTarget =
+    null
+
+
+  if (
+    currentFarmTask
+  ) {
 
     currentTask =
-      taskBeforeCombat
+      `${currentFarmTask.amount} ${currentFarmTask.resource} farmen`
+
+  } else if (
+    protectionEnabled &&
+    protectedPlayer
+  ) {
+
+    currentTask =
+      `${protectedPlayer} beschützen`
 
   } else {
 
     currentTask =
-      currentFarmTask
-        ? `${currentFarmTask.amount} ${currentFarmTask.resource} farmen`
-        : 'nichts'
+      'nichts'
   }
 
-  taskBeforeCombat = null
 
-  console.log(
-    '[SURVIVAL] Gefahr weg - vorherige Aufgabe wird fortgesetzt.'
+  log(
+    'SURVIVAL',
+    'Gefahr vorbei - Aufgabe geht weiter'
   )
 }
 
 
 // ======================================================
-// SURVIVAL SYSTEM
+// SURVIVAL LOOP
 // ======================================================
 
-function startSurvivalSystem() {
+function startSurvivalLoop() {
 
-  if (survivalLoop) {
+  if (
+    survivalLoop
+  ) {
+
     clearInterval(
       survivalLoop
     )
   }
 
+
   survivalLoop =
+
     setInterval(
+
       async () => {
+
+        if (!bot.entity) {
+
+          return
+        }
+
 
         try {
 
-          if (!bot.entity)
-            return
-
           const threat =
             findThreat()
+
 
           if (threat) {
 
@@ -622,152 +1471,355 @@ function startSurvivalSystem() {
             return
           }
 
+
           if (
-            combatActive &&
-            (
-              !combatTarget ||
-              !combatTarget.isValid
-            )
+            combatActive
           ) {
 
-            finishCombat()
+            const valid =
+
+              combatTarget?.isValid &&
+              combatTarget?.position
+
+
+            const distance =
+
+              valid
+
+                ? bot.entity.position
+                    .distanceTo(
+                      combatTarget.position
+                    )
+
+                : Infinity
+
+
+            if (
+              !valid ||
+              distance > 20
+            ) {
+
+              finishCombat()
+            }
           }
 
-          // Bei Hunger automatisch essen.
-          // Nicht essen, wenn direkt ein Gegner da ist.
+
+          // Automatisch essen
+
           if (
             !combatActive &&
             !eating &&
             (
               bot.food <= 14 ||
-              bot.health <= 11
+              bot.health <= 10
             )
           ) {
 
             await eatFood()
           }
 
+
         } catch (error) {
 
-          console.log(
-            '[SURVIVAL LOOP FEHLER]',
+          log(
+            'SURVIVAL FEHLER',
             error.message
           )
         }
 
       },
-      500
+
+      450
     )
 }
 
 
 // ======================================================
-// WARTEN BIS KAMPF VORBEI
+// WARTEN BIS GEFAHR VORBEI
 // ======================================================
 
-async function waitForSafety() {
+async function waitUntilSafe() {
 
-  while (combatActive) {
-
-    await sleep(250)
-  }
-
-  if (
-    bot.food <= 12 &&
-    !combatActive
+  while (
+    combatActive ||
+    dodgingCreeper
   ) {
 
-    await eatFood()
+    await sleep(
+      250
+    )
   }
 }
 
 
 // ======================================================
-// BEWEGUNG
+// FOLGEN
 // ======================================================
 
-function followPlayer(username) {
+function followPlayer(
+  username
+) {
 
   const player =
-    getPlayer(username)
+    getPlayer(
+      username
+    )
 
-  if (!player)
+
+  if (!player) {
+
     return
+  }
+
 
   currentTask =
     `${username} folgen`
 
-  bot.pvp.stop()
 
-  bot.pathfinder.setMovements(
-    movements
-  )
+  bot.pathfinder
+    .setMovements(
+      movements
+    )
 
-  bot.pathfinder.setGoal(
-    new GoalFollow(
-      player.entity,
-      2
-    ),
-    true
-  )
 
-  console.log(
-    `[AKTION] Folge ${username}`
+  bot.pathfinder
+    .setGoal(
+
+      new GoalFollow(
+        player.entity,
+        2
+      ),
+
+      true
+    )
+
+
+  log(
+    'AKTION',
+    `Folge ${username}`
   )
 }
 
 
-function comeToPlayer(username) {
+// ======================================================
+// KOMM ZU MIR
+// ======================================================
+
+function comeToPlayer(
+  username
+) {
 
   const player =
-    getPlayer(username)
+    getPlayer(
+      username
+    )
 
-  if (!player)
+
+  if (!player) {
+
     return
+  }
+
 
   currentTask =
     `Zu ${username} laufen`
 
-  const pos =
+
+  const position =
     player.entity.position
 
-  bot.pathfinder.setMovements(
-    movements
-  )
 
-  bot.pathfinder.setGoal(
-    new GoalNear(
-      Math.floor(pos.x),
-      Math.floor(pos.y),
-      Math.floor(pos.z),
-      1
+  bot.pathfinder
+    .setMovements(
+      movements
     )
-  )
 
-  console.log(
-    `[AKTION] Laufe zu ${username}`
+
+  bot.pathfinder
+    .setGoal(
+
+      new GoalNear(
+
+        Math.floor(
+          position.x
+        ),
+
+        Math.floor(
+          position.y
+        ),
+
+        Math.floor(
+          position.z
+        ),
+
+        1
+      )
+    )
+
+
+  log(
+    'AKTION',
+    `Laufe zu ${username}`
   )
 }
 
 
-function stopEverything() {
+// ======================================================
+// SPIELER BESCHÜTZEN
+// ======================================================
 
-  busy = false
+function protectPlayer(
+  username
+) {
 
-  if (currentFarmTask) {
-    currentFarmTask.cancelled = true
+  if (
+    !getPlayer(
+      username
+    )
+  ) {
+
+    return
   }
 
-  currentFarmTask = null
 
-  currentTask = 'nichts'
+  protectionEnabled =
+    true
+
+
+  protectedPlayer =
+    username
+
+
+  currentTask =
+    `${username} beschützen`
+
+
+  followPlayer(
+    username
+  )
+
+
+  log(
+    'SCHUTZ',
+    `Beschütze ${username}`
+  )
+}
+
+
+function stopProtection() {
+
+  protectionEnabled =
+    false
+
+
+  protectedPlayer =
+    null
+
+
+  if (
+    !currentFarmTask
+  ) {
+
+    currentTask =
+      'nichts'
+  }
+
+
+  log(
+    'SCHUTZ',
+    'Spielerschutz aus - Selbstschutz bleibt an'
+  )
+}
+
+
+// ======================================================
+// GEGNER ANGREIFEN
+// ======================================================
+
+async function attackNearestEnemy() {
+
+  const enemy =
+
+    bot.nearestEntity(
+      entity =>
+
+        isHostile(
+          entity
+        ) &&
+
+        bot.entity.position
+          .distanceTo(
+            entity.position
+          ) <= 18
+    )
+
+
+  if (!enemy) {
+
+    log(
+      'KAMPF',
+      'Kein Gegner gefunden'
+    )
+
+    return
+  }
+
+
+  await startCombat(
+    enemy
+  )
+}
+
+
+// ======================================================
+// ALLES STOPPEN
+// ======================================================
+
+function stopEverything() {
+
+  if (
+    currentFarmTask
+  ) {
+
+    currentFarmTask.cancelled =
+      true
+  }
+
+
+  currentFarmTask =
+    null
+
+
+  busy =
+    false
+
+
+  currentTask =
+    'nichts'
+
 
   bot.pvp.stop()
-  bot.pathfinder.setGoal(null)
+
+
+  bot.pathfinder
+    .setGoal(
+      null
+    )
+
+
   bot.clearControlStates()
 
-  console.log(
-    '[AKTION] Alles gestoppt.'
+
+  try {
+
+    bot.stopDigging()
+
+  } catch (_) {}
+
+
+  log(
+    'AKTION',
+    'Aufgabe gestoppt'
   )
 }
 
@@ -783,15 +1835,15 @@ async function jump() {
     true
   )
 
-  await sleep(500)
+
+  await sleep(
+    450
+  )
+
 
   bot.setControlState(
     'jump',
     false
-  )
-
-  console.log(
-    '[AKTION] Springen'
   )
 }
 
@@ -800,628 +1852,393 @@ async function jump() {
 // SPIELER ANSCHAUEN
 // ======================================================
 
-async function lookAtPlayer(username) {
+async function lookAtPlayer(
+  username
+) {
 
   const player =
-    getPlayer(username)
+    getPlayer(
+      username
+    )
 
-  if (!player)
+
+  if (!player) {
+
     return
+  }
 
-  try {
 
-    await bot.lookAt(
-      player.entity.position.offset(
+  await bot.lookAt(
+
+    player.entity.position
+      .offset(
         0,
         1.6,
         0
       )
-    )
-
-  } catch (error) {
-
-    console.log(
-      '[LOOK FEHLER]',
-      error.message
-    )
-  }
-}
-
-
-// ======================================================
-// SPIELER BESCHÜTZEN
-// ======================================================
-
-function protectPlayer(username) {
-
-  const player =
-    getPlayer(username)
-
-  if (!player)
-    return
-
-  protectionEnabled = true
-  protectedPlayer = username
-
-  currentTask =
-    `${username} beschützen`
-
-  console.log(
-    `[SCHUTZ] ${username} wird jetzt beschützt.`
-  )
-
-  followPlayer(username)
-}
-
-
-function stopProtection() {
-
-  protectionEnabled = false
-  protectedPlayer = null
-
-  bot.pvp.stop()
-
-  currentTask = 'nichts'
-
-  console.log(
-    '[SCHUTZ] Spielerschutz AUS.'
   )
 }
 
 
 // ======================================================
-// NÄCHSTEN GEGNER ANGREIFEN
+// RESSOURCEN BLÖCKE FINDEN
 // ======================================================
 
-async function attackNearestEnemy() {
+function findResourceBlocks(
+  resource
+) {
 
-  const enemy =
-    bot.nearestEntity(
-      entity =>
-        isHostile(entity) &&
-        bot.entity.position.distanceTo(
-          entity.position
-        ) <= 18
+  const name =
+    normalizeResource(
+      resource
     )
 
-  if (!enemy) {
 
-    console.log(
-      '[KAMPF] Kein Gegner gefunden.'
-    )
+  const blockNames =
+    resources[name]
 
-    return
-  }
 
-  await startCombat(enemy)
-}
+  if (!blockNames) {
 
-
-// ======================================================
-// RESSOURCEN
-// ======================================================
-
-const resources = {
-
-  holz: [
-    'oak_log',
-    'spruce_log',
-    'birch_log',
-    'jungle_log',
-    'acacia_log',
-    'dark_oak_log',
-    'mangrove_log',
-    'cherry_log',
-    'pale_oak_log'
-  ],
-
-  eichenholz: [
-    'oak_log'
-  ],
-
-  fichtenholz: [
-    'spruce_log'
-  ],
-
-  birkenholz: [
-    'birch_log'
-  ],
-
-  sand: [
-    'sand',
-    'red_sand'
-  ],
-
-  erde: [
-    'dirt',
-    'grass_block'
-  ],
-
-  kies: [
-    'gravel'
-  ],
-
-  stein: [
-    'stone'
-  ],
-
-  kohle: [
-    'coal_ore',
-    'deepslate_coal_ore'
-  ],
-
-  eisen: [
-    'iron_ore',
-    'deepslate_iron_ore'
-  ],
-
-  kupfer: [
-    'copper_ore',
-    'deepslate_copper_ore'
-  ],
-
-  gold: [
-    'gold_ore',
-    'deepslate_gold_ore'
-  ],
-
-  redstone: [
-    'redstone_ore',
-    'deepslate_redstone_ore'
-  ],
-
-  lapis: [
-    'lapis_ore',
-    'deepslate_lapis_ore'
-  ],
-
-  diamanten: [
-    'diamond_ore',
-    'deepslate_diamond_ore'
-  ],
-
-  smaragde: [
-    'emerald_ore',
-    'deepslate_emerald_ore'
-  ]
-}
-
-
-// ======================================================
-// ERWARTETE DROPS
-// ======================================================
-
-const resourceDrops = {
-
-  holz: [
-    'oak_log',
-    'spruce_log',
-    'birch_log',
-    'jungle_log',
-    'acacia_log',
-    'dark_oak_log',
-    'mangrove_log',
-    'cherry_log',
-    'pale_oak_log'
-  ],
-
-  eichenholz: [
-    'oak_log'
-  ],
-
-  fichtenholz: [
-    'spruce_log'
-  ],
-
-  birkenholz: [
-    'birch_log'
-  ],
-
-  sand: [
-    'sand',
-    'red_sand'
-  ],
-
-  erde: [
-    'dirt',
-    'grass_block'
-  ],
-
-  kies: [
-    'gravel',
-    'flint'
-  ],
-
-  stein: [
-    'cobblestone',
-    'stone'
-  ],
-
-  kohle: [
-    'coal'
-  ],
-
-  eisen: [
-    'raw_iron',
-    'iron_ingot'
-  ],
-
-  kupfer: [
-    'raw_copper',
-    'copper_ingot'
-  ],
-
-  gold: [
-    'raw_gold',
-    'gold_ingot'
-  ],
-
-  redstone: [
-    'redstone'
-  ],
-
-  lapis: [
-    'lapis_lazuli'
-  ],
-
-  diamanten: [
-    'diamond'
-  ],
-
-  smaragde: [
-    'emerald'
-  ]
-}
-
-
-// ======================================================
-// NAMEN NORMALISIEREN
-// ======================================================
-
-function normalizeResource(resource) {
-
-  let name =
-    String(resource)
-      .toLowerCase()
-      .trim()
-
-  const aliases = {
-
-    'diamant':
-      'diamanten',
-
-    'diamond':
-      'diamanten',
-
-    'diamonds':
-      'diamanten',
-
-    'dias':
-      'diamanten',
-
-    'dia':
-      'diamanten',
-
-    'smaragd':
-      'smaragde',
-
-    'emerald':
-      'smaragde',
-
-    'emeralds':
-      'smaragde',
-
-    'iron':
-      'eisen',
-
-    'iron ore':
-      'eisen',
-
-    'coal':
-      'kohle',
-
-    'wood':
-      'holz',
-
-    'logs':
-      'holz',
-
-    'log':
-      'holz',
-
-    'oak':
-      'eichenholz',
-
-    'oak wood':
-      'eichenholz',
-
-    'spruce':
-      'fichtenholz',
-
-    'birch':
-      'birkenholz',
-
-    'stone':
-      'stein',
-
-    'copper':
-      'kupfer',
-
-    'dirt':
-      'erde',
-
-    'gravel':
-      'kies'
-  }
-
-  return aliases[name] || name
-}
-
-
-// ======================================================
-// ITEM ANZAHL
-// ======================================================
-
-function countResource(resource) {
-
-  resource =
-    normalizeResource(resource)
-
-  const allowed =
-    resourceDrops[resource] || []
-
-  return bot.inventory
-    .items()
-    .filter(
-      item =>
-        allowed.includes(item.name)
-    )
-    .reduce(
-      (total, item) =>
-        total + item.count,
-      0
-    )
-}
-
-
-// ======================================================
-// BLOCKKANDIDATEN SUCHEN
-// ======================================================
-
-function findResourceCandidates(resource) {
-
-  resource =
-    normalizeResource(resource)
-
-  const names =
-    resources[resource]
-
-  if (!names)
     return []
+  }
+
 
   const ids =
-    names
+
+    blockNames
+
       .map(
-        name =>
-          mcData.blocksByName[name]?.id
+        blockName =>
+          bot.registry
+            .blocksByName[
+              blockName
+            ]?.id
       )
+
       .filter(
         id =>
-          typeof id === 'number'
+          Number.isInteger(
+            id
+          )
       )
 
-  if (ids.length === 0)
+
+  if (
+    ids.length === 0
+  ) {
+
     return []
+  }
+
 
   const positions =
+
     bot.findBlocks({
-      matching: ids,
-      maxDistance: 64,
-      count: 40
+
+      matching:
+        ids,
+
+      maxDistance:
+        64,
+
+      count:
+        48
     })
 
-  return positions
-    .map(pos =>
-      bot.blockAt(pos)
-    )
-    .filter(Boolean)
-    .sort(
-      (a, b) =>
-        bot.entity.position.distanceTo(
-          a.position
-        ) -
-        bot.entity.position.distanceTo(
-          b.position
-        )
-    )
-}
-
-
-// ======================================================
-// EINEN GUTEN BLOCK AUSWÄHLEN
-// ======================================================
-
-function findResourceBlock(resource) {
-
-  const candidates =
-    findResourceCandidates(resource)
-
-  if (candidates.length === 0)
-    return null
-
-  // Nicht direkt den Block unter den eigenen Füßen nehmen,
-  // solange es andere Optionen gibt.
-  const safeCandidates =
-    candidates.filter(block => {
-
-      const dx =
-        Math.abs(
-          block.position.x -
-          bot.entity.position.x
-        )
-
-      const dz =
-        Math.abs(
-          block.position.z -
-          bot.entity.position.z
-        )
-
-      const dy =
-        bot.entity.position.y -
-        block.position.y
-
-      const standingOnIt =
-        dx < 1 &&
-        dz < 1 &&
-        dy > 0 &&
-        dy < 2
-
-      return !standingOnIt
-    })
 
   return (
-    safeCandidates[0] ||
-    candidates[0]
+
+    positions
+
+      .map(
+        position =>
+          bot.blockAt(
+            position
+          )
+      )
+
+      .filter(
+        Boolean
+      )
+
+      .sort(
+        (
+          a,
+          b
+        ) =>
+
+          bot.entity.position
+            .distanceTo(
+              a.position
+            ) -
+
+          bot.entity.position
+            .distanceTo(
+              b.position
+            )
+      )
   )
 }
 
 
 // ======================================================
-// SMART MINING
+// BESTEN BLOCK WÄHLEN
 // ======================================================
 
-async function smartDigBlock(block) {
+function chooseResourceBlock(
+  resource
+) {
 
-  if (!block)
+  const blocks =
+    findResourceBlocks(
+      resource
+    )
+
+
+  if (
+    blocks.length === 0
+  ) {
+
+    return null
+  }
+
+
+  // Nicht direkt den Block
+  // unter den eigenen Füßen abbauen.
+
+  const safer =
+    blocks.filter(
+      block => {
+
+        const dx =
+          Math.abs(
+
+            block.position.x +
+            0.5 -
+
+            bot.entity.position.x
+          )
+
+
+        const dz =
+          Math.abs(
+
+            block.position.z +
+            0.5 -
+
+            bot.entity.position.z
+          )
+
+
+        const dy =
+
+          bot.entity.position.y -
+          block.position.y
+
+
+        const directlyBelow =
+
+          dx < 0.8 &&
+          dz < 0.8 &&
+          dy > 0 &&
+          dy < 2
+
+
+        return !directlyBelow
+      }
+    )
+
+
+  return (
+    safer[0] ||
+    blocks[0]
+  )
+}
+
+
+// ======================================================
+// SMART DIG
+// ======================================================
+
+async function smartDigBlock(
+  block
+) {
+
+  if (!block) {
+
     return false
+  }
 
-  await waitForSafety()
+
+  await waitUntilSafe()
+
 
   try {
 
-    console.log(
-      `[MINE] Ziel: ${block.name}`
-    )
+    // Zum Block laufen
 
-    // Erst hinlaufen
-    bot.pathfinder.setMovements(
-      movements
-    )
+    bot.pathfinder
+      .setMovements(
+        movements
+      )
+
 
     await bot.pathfinder.goto(
-      new GoalNear(
-        block.position.x,
-        block.position.y,
-        block.position.z,
-        2
+
+      new GoalLookAtBlock(
+
+        block.position,
+
+        bot.world,
+
+        {
+          reach: 4.5
+        }
       )
     )
 
-    await waitForSafety()
 
-    // Block kann sich durch Sand/Kies verändert haben
+    await waitUntilSafe()
+
+
+    // Block nach dem Laufen neu prüfen.
+    // Wichtig bei Sand/Kies.
+
     const freshBlock =
       bot.blockAt(
         block.position
       )
 
+
     if (
       !freshBlock ||
-      freshBlock.name === 'air'
+      freshBlock.name ===
+      'air'
     ) {
 
       return false
     }
 
-    // BESTES Werkzeug automatisch wählen.
-    // Sand -> Schaufel
-    // Holz -> Axt
-    // Stein/Erze -> Spitzhacke
-    //
-    // requireHarvest verhindert z.B.,
-    // dass Eisen/Diamant mit falschem Werkzeug zerstört wird.
+
+    // ==================================================
+    // AUTOMATISCHE WERKZEUGWAHL
+    // ==================================================
 
     try {
 
-      await bot.tool.equipForBlock(
-        freshBlock,
-        {
-          requireHarvest: true
-        }
-      )
+      await bot.tool
+        .equipForBlock(
+
+          freshBlock,
+
+          {
+            requireHarvest:
+              true
+          }
+        )
+
 
     } catch (error) {
 
-      console.log(
-        `[TOOL] Kein passendes Werkzeug für ${freshBlock.name}: ${error.message}`
+      log(
+        'TOOL',
+        `Kein geeignetes Werkzeug für ${freshBlock.name}: ${error.message}`
       )
+
 
       return false
     }
 
-    console.log(
-      `[HOTBAR] Benutze: ${bot.heldItem?.name || 'Hand'}`
+
+    log(
+      'HOTBAR',
+      `Werkzeug: ${
+        bot.heldItem?.name ||
+        'Hand'
+      }`
     )
 
+
+    // Block anschauen
+
     await bot.lookAt(
-      freshBlock.position.offset(
-        0.5,
-        0.5,
-        0.5
-      ),
+
+      freshBlock.position
+        .offset(
+          0.5,
+          0.5,
+          0.5
+        ),
+
       true
     )
 
-    await waitForSafety()
 
-    // WICHTIG:
-    // bot.dig wartet, bis der Block komplett abgebaut ist.
-    // Kein Linksklick-Spam.
+    // ==================================================
+    // BLOCK KOMPLETT ABBAUEN
+    // ==================================================
 
-    console.log(
-      `[MINE] Halte Abbauen auf ${freshBlock.name}...`
+    log(
+      'MINE',
+      `Baue ${freshBlock.name} komplett ab`
     )
+
 
     await bot.dig(
       freshBlock
     )
 
-    console.log(
-      `[MINE] ${freshBlock.name} komplett abgebaut.`
-    )
 
-    // Sand/Kies kann danach runterfallen.
-    // Kurz warten und danach neu suchen.
+    // Sand/Kies können runterfallen.
+    // Erst warten, dann Welt neu prüfen.
 
     if (
-      freshBlock.name === 'sand' ||
-      freshBlock.name === 'red_sand' ||
-      freshBlock.name === 'gravel'
+      [
+        'sand',
+        'red_sand',
+        'gravel'
+      ].includes(
+        freshBlock.name
+      )
     ) {
 
-      await sleep(500)
+      await sleep(
+        550
+      )
 
     } else {
 
-      await sleep(250)
+      await sleep(
+        250
+      )
     }
 
-    // Wir stehen nahe genug am Drop.
-    // Kurz Zeit geben, damit Minecraft ihn einsammelt.
 
-    await sleep(350)
+    // Drop aufnehmen lassen
+
+    await sleep(
+      250
+    )
+
 
     return true
 
+
   } catch (error) {
 
-    console.log(
-      `[SMART MINE FEHLER] ${error.message}`
+    log(
+      'MINE FEHLER',
+      error.message
     )
 
+
     try {
+
       bot.stopDigging()
+
     } catch (_) {}
+
 
     return false
   }
@@ -1429,7 +2246,7 @@ async function smartDigBlock(block) {
 
 
 // ======================================================
-// KLEINEN SUCHSCHRITT MACHEN
+// WEITERSUCHEN
 // ======================================================
 
 async function exploreForResource(
@@ -1437,36 +2254,85 @@ async function exploreForResource(
   attempt
 ) {
 
-  console.log(
-    `[SUCHE] Kein ${resource} gesehen. Suche weiter... (${attempt})`
-  )
+  // Oberflächen-Ressourcen kann er
+  // sinnvoll durch Herumlaufen suchen.
+
+  const surfaceResource =
+
+    [
+      'holz',
+      'eichenholz',
+      'fichtenholz',
+      'birkenholz',
+      'sand',
+      'erde',
+      'kies'
+    ].includes(
+      resource
+    )
+
+
+  if (!surfaceResource) {
+
+    log(
+      'SUCHE',
+      `${resource} ist in den geladenen Blöcken nicht sichtbar`
+    )
+
+    return false
+  }
+
 
   const distance =
-    10 + attempt * 5
+    10 +
+    attempt * 6
+
 
   const angle =
-    attempt * 1.7
+    attempt *
+    1.73
+
 
   const x =
     Math.floor(
+
       bot.entity.position.x +
-      Math.cos(angle) * distance
+
+      Math.cos(
+        angle
+      ) *
+      distance
     )
+
 
   const y =
     Math.floor(
       bot.entity.position.y
     )
 
+
   const z =
     Math.floor(
+
       bot.entity.position.z +
-      Math.sin(angle) * distance
+
+      Math.sin(
+        angle
+      ) *
+      distance
     )
+
 
   try {
 
+    log(
+      'SUCHE',
+      `Suche weiter nach ${resource}`
+    )
+
+
     await bot.pathfinder.goto(
+
       new GoalNear(
         x,
         y,
@@ -1475,7 +2341,9 @@ async function exploreForResource(
       )
     )
 
+
     return true
+
 
   } catch (_) {
 
@@ -1496,54 +2364,80 @@ async function returnToPlayer(
   const start =
     Date.now()
 
+
   while (
-    Date.now() - start <
+    Date.now() -
+    start <
     timeout
   ) {
 
-    await waitForSafety()
+    await waitUntilSafe()
+
 
     const player =
-      bot.players[username]?.entity
+      getPlayer(
+        username
+      )?.entity
+
 
     if (!player) {
 
-      await sleep(1000)
+      await sleep(
+        1000
+      )
+
       continue
     }
 
-    const distance =
-      bot.entity.position.distanceTo(
-        player.position
-      )
 
-    if (distance <= 3) {
+    if (
 
-      bot.pathfinder.setGoal(null)
+      bot.entity.position
+        .distanceTo(
+          player.position
+        ) <= 3
 
-      console.log(
-        `[RÜCKWEG] Bei ${username} angekommen.`
-      )
+    ) {
+
+      bot.pathfinder
+        .setGoal(
+          null
+        )
+
 
       return player
     }
 
-    bot.pathfinder.setMovements(
-      movements
-    )
 
-    bot.pathfinder.setGoal(
-      new GoalFollow(
-        player,
-        2
-      ),
-      true
-    )
+    bot.pathfinder
+      .setMovements(
+        movements
+      )
 
-    await sleep(500)
+
+    bot.pathfinder
+      .setGoal(
+
+        new GoalFollow(
+          player,
+          2
+        ),
+
+        true
+      )
+
+
+    await sleep(
+      500
+    )
   }
 
-  bot.pathfinder.setGoal(null)
+
+  bot.pathfinder
+    .setGoal(
+      null
+    )
+
 
   return null
 }
@@ -1559,89 +2453,122 @@ async function dropResource(
   username
 ) {
 
-  resource =
-    normalizeResource(resource)
+  const name =
+    normalizeResource(
+      resource
+    )
+
 
   const allowed =
-    resourceDrops[resource] || []
+    resourceDrops[name] || []
+
 
   let remaining =
     amount
 
+
   const player =
-    bot.players[username]?.entity
+    getPlayer(
+      username
+    )?.entity
+
 
   if (player) {
 
     try {
 
       await bot.lookAt(
-        player.position.offset(
-          0,
-          1,
-          0
-        )
+
+        player.position
+          .offset(
+            0,
+            1,
+            0
+          )
       )
 
     } catch (_) {}
   }
 
-  console.log(
-    `[DROP] ${amount} ${resource} für ${username}`
-  )
 
   for (
     const item
     of bot.inventory.items()
   ) {
 
-    if (remaining <= 0)
+    if (
+      remaining <= 0
+    ) {
+
       break
+    }
+
 
     if (
       !allowed.includes(
         item.name
       )
     ) {
+
       continue
     }
 
-    const dropAmount =
+
+    const count =
       Math.min(
-        remaining,
-        item.count
+
+        item.count,
+
+        remaining
       )
+
 
     try {
 
       await bot.toss(
+
         item.type,
+
         item.metadata,
-        dropAmount
+
+        count
       )
+
 
       remaining -=
-        dropAmount
+        count
 
-      console.log(
-        `[DROP] ${dropAmount}x ${item.name}`
+
+      log(
+        'DROP',
+        `${count}x ${item.name}`
       )
 
-      await sleep(250)
+
+      await sleep(
+        200
+      )
+
 
     } catch (error) {
 
-      console.log(
-        '[DROP FEHLER]',
+      log(
+        'DROP FEHLER',
         error.message
       )
+
 
       break
     }
   }
 
-  console.log(
-    `[DROP] Fertig: ${amount - remaining}/${amount}`
+
+  log(
+    'DROP',
+    `${
+      amount -
+      remaining
+    }/${amount} abgegeben`
   )
 }
 
@@ -1657,82 +2584,116 @@ async function farmResource(
 ) {
 
   resource =
-    normalizeResource(resource)
+    normalizeResource(
+      resource
+    )
 
-  if (!resources[resource]) {
 
-    console.log(
-      `[FARM] Unbekannte Ressource: ${resource}`
+  if (
+    !resources[resource]
+  ) {
+
+    log(
+      'FARM',
+      `Ressource kenne ich noch nicht: ${resource}`
     )
 
     return
   }
+
 
   if (busy) {
 
-    console.log(
-      '[FARM] Ich mache bereits eine Aufgabe.'
+    log(
+      'FARM',
+      'Ich habe schon eine Aufgabe'
     )
 
     return
   }
 
+
   amount =
     Math.min(
+
       Math.max(
         Number(amount) || 1,
         1
       ),
+
       64
     )
 
-  busy = true
+
+  busy =
+    true
+
 
   const task = {
+
     resource,
+
     amount,
+
     username,
-    cancelled: false
+
+    cancelled:
+      false
   }
+
 
   currentFarmTask =
     task
 
+
   currentTask =
     `${amount} ${resource} farmen`
 
-  const inventoryBefore =
-    countResource(resource)
 
-  let farmed = 0
-  let searchAttempts = 0
-  let failures = 0
+  const before =
+    countResource(
+      resource
+    )
 
-  console.log('')
-  console.log(
-    `[FARM] Neuer Auftrag: ${amount} ${resource}`
+
+  let farmed =
+    0
+
+
+  let searchAttempts =
+    0
+
+
+  let failures =
+    0
+
+
+  log(
+    'FARM',
+    `Auftrag: ${amount} ${resource}`
   )
-  console.log('')
+
 
   try {
 
     while (
-      farmed < amount &&
-      !task.cancelled
+
+      !task.cancelled &&
+
+      farmed < amount
+
     ) {
 
-      // --------------------------------------------------
-      // 1. SELBSTSCHUTZ HAT IMMER PRIORITÄT
-      // --------------------------------------------------
+      // ================================================
+      // 1. SELBSTSCHUTZ
+      // ================================================
 
-      await waitForSafety()
+      await waitUntilSafe()
 
-      if (task.cancelled)
-        break
 
-      // --------------------------------------------------
+      // ================================================
       // 2. ESSEN
-      // --------------------------------------------------
+      // ================================================
 
       if (
         bot.food <= 12 ||
@@ -1742,127 +2703,165 @@ async function farmResource(
         await eatFood()
       }
 
-      // --------------------------------------------------
-      // 3. INVENTAR VOLL?
-      // --------------------------------------------------
+
+      // ================================================
+      // 3. INVENTAR
+      // ================================================
 
       if (
-        bot.inventory.emptySlotCount() === 0
+        bot.inventory
+          .emptySlotCount() === 0
       ) {
 
-        console.log(
-          '[FARM] Inventar ist voll.'
+        log(
+          'FARM',
+          'Inventar voll'
         )
 
         break
       }
 
-      // --------------------------------------------------
+
+      // ================================================
       // 4. BLOCK SUCHEN
-      // --------------------------------------------------
+      // ================================================
 
       const target =
-        findResourceBlock(
+        chooseResourceBlock(
           resource
         )
+
 
       if (!target) {
 
         searchAttempts++
 
+
         if (
           searchAttempts > 5
         ) {
 
-          console.log(
-            `[FARM] ${resource} nach mehreren Suchversuchen nicht gefunden.`
+          log(
+            'FARM',
+            `${resource} nicht gefunden`
           )
 
           break
         }
 
-        await exploreForResource(
-          resource,
-          searchAttempts
-        )
+
+        const moved =
+          await exploreForResource(
+
+            resource,
+
+            searchAttempts
+          )
+
+
+        if (!moved) {
+
+          break
+        }
+
 
         continue
       }
 
-      searchAttempts = 0
 
-      console.log(
-        `[FARM] Nächstes Ziel: ${target.name}`
-      )
+      searchAttempts =
+        0
 
-      // --------------------------------------------------
-      // 5. RICHTIG ABBAUEN
-      // --------------------------------------------------
+
+      // ================================================
+      // 5. SMART ABBAUEN
+      // ================================================
 
       const success =
         await smartDigBlock(
           target
         )
 
+
       if (!success) {
 
         failures++
 
-        if (failures >= 5) {
 
-          console.log(
-            '[FARM] Zu viele Mining-Fehler. Breche ab.'
+        if (
+          failures >= 6
+        ) {
+
+          log(
+            'FARM',
+            'Zu viele Mining-Fehler'
           )
 
           break
         }
 
-        await sleep(300)
+
+        await sleep(
+          300
+        )
+
 
         continue
       }
 
-      failures = 0
 
-      // --------------------------------------------------
+      failures =
+        0
+
+
+      // ================================================
       // 6. ECHTE ITEMS ZÄHLEN
-      // --------------------------------------------------
+      // ================================================
 
       farmed =
         Math.max(
+
           0,
-          countResource(resource) -
-          inventoryBefore
+
+          countResource(
+            resource
+          ) -
+          before
         )
 
-      console.log(
-        `[FARM] Fortschritt: ${farmed}/${amount} ${resource}`
+
+      log(
+        'FARM',
+        `Fortschritt ${farmed}/${amount}`
       )
     }
 
+
   } catch (error) {
 
-    console.log(
-      '[FARM FEHLER]',
+    log(
+      'FARM FEHLER',
       error.message
     )
+
 
   } finally {
 
     farmed =
       Math.max(
+
         0,
-        countResource(resource) -
-        inventoryBefore
+
+        countResource(
+          resource
+        ) -
+        before
       )
 
-    console.log(
-      `[FARM] Farming beendet: ${farmed}/${amount}`
-    )
 
-    // --------------------------------------------------
-    // ZURÜCK ZUM SPIELER
-    // --------------------------------------------------
+    // ================================================
+    // ZURÜCKKOMMEN + DROPPEN
+    // ================================================
 
     if (
       !task.cancelled &&
@@ -1872,37 +2871,428 @@ async function farmResource(
       currentTask =
         `${resource} zu ${username} bringen`
 
+
       const player =
         await returnToPlayer(
           username
         )
 
+
       if (player) {
 
-        await waitForSafety()
+        await waitUntilSafe()
 
-        const toDrop =
+
+        await dropResource(
+
+          resource,
+
           Math.min(
             farmed,
             amount
-          )
+          ),
 
-        await dropResource(
-          resource,
-          toDrop,
           username
         )
       }
     }
 
-    currentFarmTask = null
-    busy = false
+
+    currentFarmTask =
+      null
+
+
+    busy =
+      false
+
 
     currentTask =
-      protectionEnabled && protectedPlayer
+
+      protectionEnabled &&
+      protectedPlayer
+
         ? `${protectedPlayer} beschützen`
+
         : 'nichts'
   }
+}
+
+
+// ======================================================
+// SCHNELLE COMMAND ERKENNUNG
+// ======================================================
+// Häufige Sachen gehen OHNE API.
+// Dadurch reagiert Farming deutlich schneller.
+// Schwierige Sätze gehen danach zur KI.
+// ======================================================
+
+function parseFastCommand(
+  username,
+  message
+) {
+
+  const msg =
+    message
+      .toLowerCase()
+      .trim()
+
+
+  if (
+    /\b(stopp|stop|warte hier|bleib stehen)\b/
+      .test(
+        msg
+      )
+  ) {
+
+    stopEverything()
+
+    return true
+  }
+
+
+  if (
+    msg.includes(
+      'beschütz mich'
+    ) ||
+
+    msg.includes(
+      'beschuetze mich'
+    ) ||
+
+    msg.includes(
+      'pass auf mich auf'
+    )
+  ) {
+
+    protectPlayer(
+      username
+    )
+
+    return true
+  }
+
+
+  if (
+    msg.includes(
+      'schutz aus'
+    ) ||
+
+    msg.includes(
+      'beschütz mich nicht mehr'
+    )
+  ) {
+
+    stopProtection()
+
+    return true
+  }
+
+
+  if (
+    msg.includes(
+      'folg mir'
+    ) ||
+
+    msg.includes(
+      'folge mir'
+    ) ||
+
+    msg.includes(
+      'komm mit'
+    )
+  ) {
+
+    followPlayer(
+      username
+    )
+
+    return true
+  }
+
+
+  if (
+    msg === 'komm' ||
+
+    msg.includes(
+      'komm her'
+    ) ||
+
+    msg.includes(
+      'komm zu mir'
+    )
+  ) {
+
+    comeToPlayer(
+      username
+    )
+
+    return true
+  }
+
+
+  if (
+    msg.includes(
+      'mach den'
+    ) ||
+
+    msg.includes(
+      'greif'
+    ) ||
+
+    msg.includes(
+      'kämpf'
+    )
+  ) {
+
+    attackNearestEnemy()
+
+    return true
+  }
+
+
+  const known = [
+
+    [
+      'diamanten',
+      [
+        'diamant',
+        'diamanten',
+        'dia',
+        'dias'
+      ]
+    ],
+
+    [
+      'smaragde',
+      [
+        'smaragd',
+        'smaragde'
+      ]
+    ],
+
+    [
+      'eisen',
+      [
+        'eisen',
+        'iron'
+      ]
+    ],
+
+    [
+      'kohle',
+      [
+        'kohle',
+        'coal'
+      ]
+    ],
+
+    [
+      'kupfer',
+      [
+        'kupfer',
+        'copper'
+      ]
+    ],
+
+    [
+      'gold',
+      [
+        'gold'
+      ]
+    ],
+
+    [
+      'redstone',
+      [
+        'redstone'
+      ]
+    ],
+
+    [
+      'lapis',
+      [
+        'lapis'
+      ]
+    ],
+
+    [
+      'sand',
+      [
+        'sand'
+      ]
+    ],
+
+    [
+      'kies',
+      [
+        'kies',
+        'gravel'
+      ]
+    ],
+
+    [
+      'erde',
+      [
+        'erde',
+        'dirt'
+      ]
+    ],
+
+    [
+      'stein',
+      [
+        'stein',
+        'stone'
+      ]
+    ],
+
+    [
+      'eichenholz',
+      [
+        'eichenholz'
+      ]
+    ],
+
+    [
+      'fichtenholz',
+      [
+        'fichtenholz'
+      ]
+    ],
+
+    [
+      'birkenholz',
+      [
+        'birkenholz'
+      ]
+    ],
+
+    [
+      'holz',
+      [
+        'holz',
+        'wood'
+      ]
+    ]
+  ]
+
+
+  const farmWords = [
+
+    'farm',
+
+    'hol',
+
+    'besorg',
+
+    'sammel',
+
+    'sammle',
+
+    'brauch'
+  ]
+
+
+  if (
+    !farmWords.some(
+      word =>
+        msg.includes(
+          word
+        )
+    )
+  ) {
+
+    return false
+  }
+
+
+  let resource =
+    null
+
+
+  for (
+    const [
+      canonical,
+      aliases
+    ]
+    of known
+  ) {
+
+    if (
+      aliases.some(
+        alias =>
+          msg.includes(
+            alias
+          )
+      )
+    ) {
+
+      resource =
+        canonical
+
+      break
+    }
+  }
+
+
+  if (!resource) {
+
+    return false
+  }
+
+
+  let amount =
+    16
+
+
+  const number =
+    msg.match(
+      /\b(\d{1,3})\b/
+    )
+
+
+  if (number) {
+
+    amount =
+      Number(
+        number[1]
+      )
+
+  } else if (
+    msg.includes(
+      'stack'
+    )
+  ) {
+
+    amount =
+      64
+
+  } else if (
+    msg.includes(
+      'bisschen'
+    ) ||
+
+    msg.includes(
+      'etwas'
+    )
+  ) {
+
+    amount =
+      16
+  }
+
+
+  farmResource(
+
+    resource,
+
+    amount,
+
+    username
+  )
+
+
+  return true
 }
 
 
@@ -1913,27 +3303,42 @@ async function farmResource(
 const aiTools = [
 
   {
-    type: 'function',
-    name: 'farm_resource',
+
+    type:
+      'function',
+
+    name:
+      'farm_resource',
 
     description:
-      'Farme eine Minecraft-Ressource. Naxy sucht sie, wählt automatisch das richtige Werkzeug, baut korrekt ab, verteidigt sich bei Gefahr, setzt danach das Farming fort, kehrt zurück und droppt die neu gefarmten Items.',
+      'Farme eine Ressource. Der Bot wählt Werkzeug, verteidigt sich, setzt danach fort und bringt Items zurück.',
 
     parameters: {
-      type: 'object',
+
+      type:
+        'object',
 
       properties: {
 
         resource: {
-          type: 'string',
+
+          type:
+            'string',
+
           description:
             'holz, eichenholz, fichtenholz, birkenholz, sand, erde, kies, stein, kohle, eisen, kupfer, gold, redstone, lapis, diamanten oder smaragde'
         },
 
         amount: {
-          type: 'integer',
-          minimum: 1,
-          maximum: 64
+
+          type:
+            'integer',
+
+          minimum:
+            1,
+
+          maximum:
+            64
         }
       },
 
@@ -1946,143 +3351,224 @@ const aiTools = [
         false
     },
 
-    strict: true
+    strict:
+      true
   },
 
 
   {
-    type: 'function',
-    name: 'follow_player',
+
+    type:
+      'function',
+
+    name:
+      'follow_player',
 
     description:
-      'Folge dem Spieler dauerhaft.',
+      'Folge dem Spieler.',
 
     parameters: {
-      type: 'object',
+
+      type:
+        'object',
+
       properties: {},
-      additionalProperties: false
+
+      additionalProperties:
+        false
     },
 
-    strict: true
+    strict:
+      true
   },
 
 
   {
-    type: 'function',
-    name: 'come_to_player',
+
+    type:
+      'function',
+
+    name:
+      'come_to_player',
 
     description:
       'Laufe zum Spieler.',
 
     parameters: {
-      type: 'object',
+
+      type:
+        'object',
+
       properties: {},
-      additionalProperties: false
+
+      additionalProperties:
+        false
     },
 
-    strict: true
+    strict:
+      true
   },
 
 
   {
-    type: 'function',
-    name: 'protect_player',
+
+    type:
+      'function',
+
+    name:
+      'protect_player',
 
     description:
-      'Beschütze zusätzlich den Spieler. Selbstschutz des Bots ist sowieso immer aktiv.',
+      'Beschütze zusätzlich den Spieler. Selbstschutz ist immer aktiv.',
 
     parameters: {
-      type: 'object',
+
+      type:
+        'object',
+
       properties: {},
-      additionalProperties: false
+
+      additionalProperties:
+        false
     },
 
-    strict: true
+    strict:
+      true
   },
 
 
   {
-    type: 'function',
-    name: 'stop_protection',
+
+    type:
+      'function',
+
+    name:
+      'stop_protection',
 
     description:
-      'Beende den zusätzlichen Schutz des Spielers. Selbstschutz bleibt an.',
+      'Beende den zusätzlichen Spielerschutz.',
 
     parameters: {
-      type: 'object',
+
+      type:
+        'object',
+
       properties: {},
-      additionalProperties: false
+
+      additionalProperties:
+        false
     },
 
-    strict: true
+    strict:
+      true
   },
 
 
   {
-    type: 'function',
-    name: 'attack_enemy',
+
+    type:
+      'function',
+
+    name:
+      'attack_enemy',
 
     description:
       'Greife den nächsten feindlichen Mob an.',
 
     parameters: {
-      type: 'object',
+
+      type:
+        'object',
+
       properties: {},
-      additionalProperties: false
+
+      additionalProperties:
+        false
     },
 
-    strict: true
+    strict:
+      true
   },
 
 
   {
-    type: 'function',
-    name: 'stop',
+
+    type:
+      'function',
+
+    name:
+      'stop',
 
     description:
       'Stoppe die aktuelle Aufgabe.',
 
     parameters: {
-      type: 'object',
+
+      type:
+        'object',
+
       properties: {},
-      additionalProperties: false
+
+      additionalProperties:
+        false
     },
 
-    strict: true
+    strict:
+      true
   },
 
 
   {
-    type: 'function',
-    name: 'jump',
+
+    type:
+      'function',
+
+    name:
+      'jump',
 
     description:
       'Springe einmal.',
 
     parameters: {
-      type: 'object',
+
+      type:
+        'object',
+
       properties: {},
-      additionalProperties: false
+
+      additionalProperties:
+        false
     },
 
-    strict: true
+    strict:
+      true
   },
 
 
   {
-    type: 'function',
-    name: 'look_at_player',
+
+    type:
+      'function',
+
+    name:
+      'look_at_player',
 
     description:
       'Schau den Spieler an.',
 
     parameters: {
-      type: 'object',
+
+      type:
+        'object',
+
       properties: {},
-      additionalProperties: false
+
+      additionalProperties:
+        false
     },
 
-    strict: true
+    strict:
+      true
   }
 ]
 
@@ -2096,232 +3582,301 @@ async function askAI(
   message
 ) {
 
-  console.log(
-    `[KI] ${username}: ${message}`
-  )
-
   try {
 
     const response =
-      await openai.responses.create({
 
-        model:
-          AI_MODEL,
+      await openai.responses
+        .create({
 
-        instructions: `
-Du bist das Gehirn von NaxyBot.
+          model:
+            AI_MODEL,
 
-NaxyBot ist ein intelligenter Minecraft-Begleiter.
 
-Der Spieler spricht normales lockeres Deutsch und muss keine festen Commands benutzen.
+          instructions: `
 
-DEINE AUFGABE:
-Verstehe, WAS der Spieler möchte.
-Der Code kümmert sich darum, WIE Minecraft technisch gespielt wird.
+Du bist das Entscheidungs-Gehirn von NaxyBot.
 
-WICHTIGES MINECRAFT-WISSEN:
+NaxyBot ist ein intelligenter
+Minecraft-Java-Begleiter.
 
-- Sand wird am schnellsten mit einer Schaufel abgebaut.
-- Holz wird am schnellsten mit einer Axt abgebaut.
-- Stein und Erze benötigen normalerweise eine Spitzhacke.
-- Manche Erze brauchen eine ausreichend gute Spitzhacke.
-- Der Bot darf wertvolle Erze nicht mit einem falschen Werkzeug verschwenden.
-- Wenn ein Gegner kommt, pausiert Farming automatisch.
-- Nach dem Kampf setzt der Bot die Farming-Aufgabe automatisch fort.
-- Der Bot schützt sich IMMER selbst.
-- Wenn Spielerschutz aktiv ist, schützt er zusätzlich seinen Spieler.
-- Wenn der Bot Hunger hat oder verletzt ist, kann er Essen benutzen.
-- Nach dem Farming kehrt er zum Spieler zurück und droppt die neu gesammelten Items.
-- Bei Sand und Kies können Blöcke herunterfallen. Der Bot sucht deshalb nach jedem Block erneut.
-- Der Bot soll nicht stumpf auf denselben kaputten Block schlagen.
-- Wenn keine Ressource direkt sichtbar ist, kann der Bot ein Stück weitersuchen.
-- Wenn eine Menge nicht genannt wurde, wähle eine sinnvolle kleine Menge.
-- "bisschen" bedeutet normalerweise etwa 16.
-- "Stack" bedeutet 64.
+Verstehe lockeres deutsches Minecraft-Deutsch.
+
+Der Code kümmert sich um die technische Ausführung.
+Du wählst die passende Aktion.
+
+Minecraft-Wissen:
+
+- Sand, Erde und Kies werden sinnvoll mit einer Schaufel abgebaut.
+
+- Holz wird sinnvoll mit einer Axt abgebaut.
+
+- Stein und Erze benötigen eine Spitzhacke.
+
+- Wertvolle Erze dürfen nicht mit falschem Werkzeug zerstört werden.
+
+- Sand und Kies können nach unten fallen.
+  Deshalb wird nach jedem Block die Welt neu geprüft.
+
+- Selbstschutz läuft IMMER und hat Vorrang.
+
+- Nach einem Kampf wird eine Farm-Aufgabe fortgesetzt.
+
+- Bei Hunger oder wenig Leben kann der Bot essen.
+
+- Nach dem Farming kommt der Bot zum Auftraggeber zurück.
+
+- Danach droppt er die neu gesammelten Items.
+
+- Ein Stack bedeutet 64.
+
+- "bisschen" bedeutet ungefähr 16.
+
 - "Dias" bedeutet Diamanten.
 
-BEISPIELE:
+- Kämpfe nicht gegen Spieler.
 
-"hol mir einen stack sand"
-=> farm_resource(resource="sand", amount=64)
-
-"ich brauch bisschen holz"
-=> farm_resource(resource="holz", amount=16)
-
-"besorg mir 20 eisen"
-=> farm_resource(resource="eisen", amount=20)
-
-"farm 5 dias"
-=> farm_resource(resource="diamanten", amount=5)
-
-"komm mit"
-=> follow_player
-
-"komm her"
-=> come_to_player
-
-"pass auf mich auf"
-=> protect_player
-
-"mach den zombie weg"
-=> attack_enemy
-
-"stopp"
-=> stop
-
-Benutze ausschließlich Funktionen, die dir als Tools gegeben wurden.
+- Nutze ausschließlich vorhandene Tools.
 `,
 
-        input: `
-SPIELER:
-${username}
+
+          input:
+            `SPIELER: ${username}
 
 NACHRICHT:
 ${message}
 
-${getBotState(username)}
-`,
+${getBotState(username)}`,
 
-        tools:
-          aiTools,
 
-        tool_choice:
-          'auto'
-      })
+          tools:
+            aiTools,
 
-    const calls =
-      response.output.filter(
-        item =>
-          item.type ===
-          'function_call'
-      )
 
-    if (
-      calls.length === 0
-    ) {
+          tool_choice:
+            'auto'
+        })
 
-      console.log(
-        '[KI] Keine Aktion erkannt.'
-      )
+
+    const call =
+
+      response.output
+        .find(
+          item =>
+            item.type ===
+            'function_call'
+        )
+
+
+    if (!call) {
+
+      const answer =
+        response.output_text
+          ?.trim()
+
+
+      if (answer) {
+
+        await safeSay(
+          answer
+        )
+      }
+
 
       return
     }
 
-    // Mehrere Aktionen nacheinander möglich
-    for (
-      const call
-      of calls
+
+    let args = {}
+
+
+    try {
+
+      args =
+        JSON.parse(
+          call.arguments || '{}'
+        )
+
+    } catch (_) {}
+
+
+    log(
+      'KI',
+      `${call.name} ${JSON.stringify(args)}`
+    )
+
+
+    switch (
+      call.name
     ) {
 
-      let args = {}
+      case 'farm_resource':
 
-      try {
+        await farmResource(
 
-        args =
-          JSON.parse(
-            call.arguments || '{}'
-          )
+          args.resource,
 
-      } catch (_) {}
+          args.amount,
 
-      console.log(
-        `[KI] ${call.name}`,
-        args
-      )
+          username
+        )
 
-      switch (
-        call.name
-      ) {
-
-        case 'farm_resource':
-
-          await farmResource(
-            args.resource,
-            args.amount,
-            username
-          )
-
-          break
+        break
 
 
-        case 'follow_player':
+      case 'follow_player':
 
-          followPlayer(
-            username
-          )
+        followPlayer(
+          username
+        )
 
-          break
-
-
-        case 'come_to_player':
-
-          comeToPlayer(
-            username
-          )
-
-          break
+        break
 
 
-        case 'protect_player':
+      case 'come_to_player':
 
-          protectPlayer(
-            username
-          )
+        comeToPlayer(
+          username
+        )
 
-          break
-
-
-        case 'stop_protection':
-
-          stopProtection()
-
-          break
+        break
 
 
-        case 'attack_enemy':
+      case 'protect_player':
 
-          await attackNearestEnemy()
+        protectPlayer(
+          username
+        )
 
-          break
-
-
-        case 'stop':
-
-          stopEverything()
-
-          break
+        break
 
 
-        case 'jump':
+      case 'stop_protection':
 
-          await jump()
+        stopProtection()
 
-          break
+        break
 
 
-        case 'look_at_player':
+      case 'attack_enemy':
 
-          await lookAtPlayer(
-            username
-          )
+        await attackNearestEnemy()
 
-          break
-      }
+        break
+
+
+      case 'stop':
+
+        stopEverything()
+
+        break
+
+
+      case 'jump':
+
+        await jump()
+
+        break
+
+
+      case 'look_at_player':
+
+        await lookAtPlayer(
+          username
+        )
+
+        break
     }
+
 
   } catch (error) {
 
-    console.log(
-      '[KI FEHLER]'
+    log(
+      'KI FEHLER',
+      error.message
     )
-
-    console.error(error)
   }
 }
 
 
 // ======================================================
-// CHAT LESEN
+// SPAWN
+// ======================================================
+
+bot.once(
+  'spawn',
+
+  () => {
+
+    movements =
+      new Movements(
+        bot
+      )
+
+
+    // Beim normalen Laufen keine Welt zerstören.
+    // Zielblöcke werden gezielt mit smartDigBlock abgebaut.
+
+    movements.canDig =
+      false
+
+
+    movements.allow1by1towers =
+      false
+
+
+    bot.pathfinder
+      .setMovements(
+        movements
+      )
+
+
+    log(
+      'START',
+      'NaxyBot ist online auf Minecraft 1.21.11'
+    )
+
+
+    log(
+      'START',
+      'Smart Farming aktiv'
+    )
+
+
+    log(
+      'START',
+      'Auto Werkzeug aktiv'
+    )
+
+
+    log(
+      'START',
+      'Selbstschutz aktiv'
+    )
+
+
+    log(
+      'START',
+      'Auto Essen aktiv'
+    )
+
+
+    if (!BOT_CHAT) {
+
+      log(
+        'START',
+        'Bot Chat AUS wegen dem bisherigen Chat-Validation-Problem'
+      )
+    }
+
+
+    startSurvivalLoop()
+  }
+)
+
+
+// ======================================================
+// CHAT
 // ======================================================
 
 bot.on(
@@ -2336,8 +3891,10 @@ bot.on(
       username ===
       bot.username
     ) {
+
       return
     }
+
 
     if (
       !isAllowedPlayer(
@@ -2345,16 +3902,31 @@ bot.on(
       )
     ) {
 
-      console.log(
-        `[IGNORIERT] ${username}`
+      return
+    }
+
+
+    log(
+      'CHAT',
+      `${username}: ${message}`
+    )
+
+
+    // Häufige Commands instant verstehen.
+    // Kein Warten auf OpenAI nötig.
+
+    if (
+      parseFastCommand(
+        username,
+        message
       )
+    ) {
 
       return
     }
 
-    console.log(
-      `[CHAT] ${username}: ${message}`
-    )
+
+    // Komplizierte Sprache -> KI
 
     await askAI(
       username,
@@ -2365,7 +3937,7 @@ bot.on(
 
 
 // ======================================================
-// MOB STIRBT
+// GEGNER VERSCHWINDET / STIRBT
 // ======================================================
 
 bot.on(
@@ -2374,36 +3946,16 @@ bot.on(
   entity => {
 
     if (
+
       combatTarget &&
+
       entity.id ===
       combatTarget.id
+
     ) {
 
       finishCombat()
     }
-  }
-)
-
-
-// ======================================================
-// BOT WIRD VERLETZT
-// ======================================================
-
-bot.on(
-  'entityHurt',
-
-  entity => {
-
-    if (
-      entity !==
-      bot.entity
-    ) {
-      return
-    }
-
-    console.log(
-      `[SURVIVAL] Naxy wurde getroffen. Leben: ${bot.health}/20`
-    )
   }
 )
 
@@ -2417,22 +3969,38 @@ bot.on(
 
   () => {
 
-    console.log(
-      '[TOD] NaxyBot ist gestorben.'
+    log(
+      'TOD',
+      'NaxyBot ist gestorben'
     )
+
 
     bot.pvp.stop()
 
-    combatActive = false
-    combatTarget = null
 
-    // Aktuelle Farming-Aufgabe abbrechen,
-    // damit nach Respawn nichts kaputt läuft.
-    if (currentFarmTask) {
-      currentFarmTask.cancelled = true
+    combatActive =
+      false
+
+
+    combatTarget =
+      null
+
+
+    if (
+      currentFarmTask
+    ) {
+
+      currentFarmTask.cancelled =
+        true
     }
 
-    busy = false
+
+    currentFarmTask =
+      null
+
+
+    busy =
+      false
   }
 )
 
@@ -2446,25 +4014,9 @@ bot.on(
 
   () => {
 
-    console.log(
-      '[RESPAWN] NaxyBot ist wieder da.'
-    )
-
-    setTimeout(
-      () => {
-
-        if (
-          protectionEnabled &&
-          protectedPlayer
-        ) {
-
-          protectPlayer(
-            protectedPlayer
-          )
-        }
-
-      },
-      1500
+    log(
+      'RESPAWN',
+      'NaxyBot ist wieder da'
     )
   }
 )
@@ -2479,19 +4031,19 @@ bot.on(
 
   reason => {
 
-    console.log('')
     console.log(
       'BOT WURDE GEKICKT:'
     )
 
-    console.log(reason)
-    console.log('')
+    console.log(
+      reason
+    )
   }
 )
 
 
 // ======================================================
-// FEHLER
+// ERROR
 // ======================================================
 
 bot.on(
@@ -2499,13 +4051,13 @@ bot.on(
 
   error => {
 
-    console.log('')
     console.log(
       'MINECRAFT FEHLER:'
     )
 
-    console.error(error)
-    console.log('')
+    console.error(
+      error
+    )
   }
 )
 
@@ -2519,8 +4071,8 @@ bot.on(
 
   reason => {
 
-    console.log(
-      '[ENDE]',
+    log(
+      'ENDE',
       reason
     )
   }
