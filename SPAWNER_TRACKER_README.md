@@ -8,6 +8,7 @@
 - Eigener Ankaufspreis = höchstes Angebot minus 1.000.000.
 - Erkennung von Schreibweisen wie Skeleton, Skelly, Skelett und Skelet.
 - Ausgabe als Embed im eigenen Zielkanal; vorhandenes Tracker-Embed wird bei Updates bearbeitet.
+- Separater Quellen-Channel zeigt pro Spawner den Ursprung als Server 1/5 bis Server 5/5; auch dieses Embed wird aktualisiert. Die Nummern folgen der Reihenfolge in SOURCE_CHANNEL_IDS.
 - Standardmäßiger Scan alle 2 Minuten.
 
 ## Einrichtung später
@@ -15,6 +16,7 @@ GitHub speichert nur den Code. Für 24/7-Betrieb braucht es einen Host.
 Benötigte Umgebungsvariablen:
 - DISCORD_TOKEN
 - TARGET_CHANNEL_ID
+- SOURCE_INFO_CHANNEL_ID (separater Channel für die Herkunft der Preise)
 - SOURCE_CHANNEL_IDS (fünf Channel-IDs, kommasepariert)
 - optional SCAN_INTERVAL_MINUTES (Standard 2)
 - optional MAX_MESSAGES_PER_CHANNEL (Standard 150)
