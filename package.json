@@ -1,16 +1,15 @@
 {
-  "name": "naxybot",
-  "version": "5.0.0",
-  "description": "Naxy intelligent Minecraft farming companion",
+  "name": "naxybot-spawner-tracker",
+  "version": "1.0.0",
+  "description": "Discord Spawner Ankauf Tracker",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "dependencies": {
-    "mineflayer": "4.36.0",
-    "mineflayer-pathfinder": "latest",
-    "mineflayer-pvp": "latest",
-    "mineflayer-tool": "latest",
-    "openai": "latest"
+    "discord.js": "^14.19.3"
   }
 }
