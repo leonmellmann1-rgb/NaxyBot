@@ -6,7 +6,7 @@ const {
 } = require("discord.js");
 
 const token = process.env.DISCORD_TOKEN;
-const targetChannelId = process.env.TARGET_CHANNEL_ID;
+const targetChannelId = process.env.TARGET_CHANNEL_ID || "1567628840619221042";
 const sourceInfoChannelId = process.env.SOURCE_INFO_CHANNEL_ID;
 const configuredSourceChannelIds = [
   "1520163833887330427",
