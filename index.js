@@ -190,7 +190,7 @@ async function publish() {
   }
   const sourceLines = sorted.length
     ? sorted.map(x =>
-        `**${x.spawner}-Spawner:** Server ${x.sourceNumber}/${sourceChannelIds.length} (${x.source}) · ${formatMoney(x.marketPrice)} · [Quelle] (${x.messageUrl})`
+        `**${x.spawner}-Spawner:** Server ${x.sourceNumber}/${sourceChannelIds.length} (${x.source}) · ${formatMoney(x.marketPrice)} · [Quelle](${x.messageUrl})`
       ).join("\n")
     : "Noch keine passenden Ankaufangebote gefunden.";
   const sourceEmbed = new EmbedBuilder()
