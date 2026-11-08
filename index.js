@@ -7,6 +7,7 @@ const {
 
 const token = process.env.DISCORD_TOKEN;
 const targetChannelId = process.env.TARGET_CHANNEL_ID;
+const sourceInfoChannelId = process.env.SOURCE_INFO_CHANNEL_ID;
 const sourceChannelIds = (process.env.SOURCE_CHANNEL_IDS || "")
   .split(",").map(x => x.trim()).filter(Boolean);
 const scanIntervalMinutes = Math.max(1, Number(process.env.SCAN_INTERVAL_MINUTES || 2));
@@ -15,6 +16,7 @@ const undercut = 1_000_000;
 
 if (!token) throw new Error("DISCORD_TOKEN fehlt.");
 if (!targetChannelId) throw new Error("TARGET_CHANNEL_ID fehlt.");
+if (!sourceInfoChannelId) throw new Error("SOURCE_INFO_CHANNEL_ID fehlt.");
 if (sourceChannelIds.length === 0) throw new Error("SOURCE_CHANNEL_IDS fehlt. Trage die fünf Quell-Channel-IDs kommasepariert ein.");
 
 const client = new Client({
@@ -114,7 +116,7 @@ async function fetchRecentMessages(channel) {
 async function collectOffers() {
   const best = new Map();
   const checked = [];
-  for (const channelId of sourceChannelIds) {
+  for (const [sourceIndex, channelId] of sourceChannelIds.entries()) {
     try {
       const channel = await client.channels.fetch(channelId);
       if (!channel || !channel.isTextBased() || !channel.messages) {
@@ -139,6 +141,7 @@ async function collectOffers() {
             marketPrice: price,
             ourPrice: Math.max(0, price - undercut),
             source: channel.guild?.name || "Discord-Server",
+            sourceNumber: sourceIndex + 1,
             channelId,
             messageUrl: message.url,
             createdTimestamp: message.createdTimestamp,
@@ -162,7 +165,7 @@ async function publish() {
   const sorted = [...best.values()].sort((a, b) => a.spawner.localeCompare(b.spawner, "de"));
   const description = sorted.length
     ? sorted.map(x =>
-        `**${x.spawner}-Spawner**\nUnser Ankauf: **${formatMoney(x.ourPrice)}** · höchstes gefundenes Angebot: ${formatMoney(x.marketPrice)}\nQuelle: [Nachricht öffnen](${x.messageUrl})`
+        `**${x.spawner}-Spawner**\nUnser Ankauf: **${formatMoney(x.ourPrice)}** · höchstes gefundenes Angebot: ${formatMoney(x.marketPrice)}\nQuelle: Server ${x.sourceNumber}/${sourceChannelIds.length} · [Nachricht öffnen](${x.messageUrl})`
       ).join("\n\n")
     : "Noch keine passenden Ankaufangebote gefunden. Prüfe Quell-Channel-IDs und Leseberechtigungen.";
 
@@ -181,6 +184,32 @@ async function publish() {
   const previous = recent.find(m => m.author.id === client.user.id && m.embeds[0]?.title === "💰 Spawner Tracker · Ankauf");
   if (previous) await previous.edit({ embeds: [embed] });
   else await target.send({ embeds: [embed] });
+  const sourceInfo = await client.channels.fetch(sourceInfoChannelId);
+  if (!sourceInfo || !sourceInfo.isTextBased() || !sourceInfo.send) {
+    throw new Error("SOURCE_INFO_CHANNEL_ID ist nicht lesbar/beschreibbar.");
+  }
+  const sourceLines = sorted.length
+    ? sorted.map(x =>
+        `**${x.spawner}-Spawner:** Server ${x.sourceNumber}/${sourceChannelIds.length} (${x.source}) · ${formatMoney(x.marketPrice)} · [Quelle] (${x.messageUrl})`
+      ).join("\n")
+    : "Noch keine passenden Ankaufangebote gefunden.";
+  const sourceEmbed = new EmbedBuilder()
+    .setTitle("🔎 Spawner Tracker · Preisquellen")
+    .setColor(0x2563eb)
+    .setDescription(sourceLines.slice(0, 4000))
+    .addFields(
+      { name: "Server geprüft", value: checked.length + "/" + sourceChannelIds.length, inline: true },
+      { name: "Letzter Check", value: new Date().toLocaleString("de-DE", { timeZone: "Europe/Berlin" }), inline: true },
+    )
+    .setFooter({ text: "Server 1/5 bis 5/5 folgen der Reihenfolge deiner SOURCE_CHANNEL_IDS" });
+
+  const sourceRecent = await sourceInfo.messages.fetch({ limit: 25 });
+  const previousSource = sourceRecent.find(m =>
+    m.author.id === client.user.id && m.embeds[0]?.title === "🔎 Spawner Tracker · Preisquellen"
+  );
+  if (previousSource) await previousSource.edit({ embeds: [sourceEmbed] });
+  else await sourceInfo.send({ embeds: [sourceEmbed] });
+
   console.log(`Update fertig: ${sorted.length} Spawner, ${checked.length} Quellkanäle.`);
 }
 
