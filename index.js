@@ -8,7 +8,14 @@ const {
 const token = process.env.DISCORD_TOKEN;
 const targetChannelId = process.env.TARGET_CHANNEL_ID;
 const sourceInfoChannelId = process.env.SOURCE_INFO_CHANNEL_ID;
-const sourceChannelIds = (process.env.SOURCE_CHANNEL_IDS || "")
+const configuredSourceChannelIds = [
+  "1520163833887330427",
+  "1485005896038875221",
+  "1513500032328925286",
+  "1488169399897559172",
+  "1504584976656761013",
+];
+const sourceChannelIds = (process.env.SOURCE_CHANNEL_IDS || configuredSourceChannelIds.join(","))
   .split(",").map(x => x.trim()).filter(Boolean);
 const scanIntervalMinutes = Math.max(1, Number(process.env.SCAN_INTERVAL_MINUTES || 2));
 const maxMessagesPerChannel = Math.min(500, Math.max(20, Number(process.env.MAX_MESSAGES_PER_CHANNEL || 150)));
@@ -17,7 +24,7 @@ const undercut = 1_000_000;
 if (!token) throw new Error("DISCORD_TOKEN fehlt.");
 if (!targetChannelId) throw new Error("TARGET_CHANNEL_ID fehlt.");
 if (!sourceInfoChannelId) throw new Error("SOURCE_INFO_CHANNEL_ID fehlt.");
-if (sourceChannelIds.length === 0) throw new Error("SOURCE_CHANNEL_IDS fehlt. Trage die fünf Quell-Channel-IDs kommasepariert ein.");
+if (sourceChannelIds.length === 0) throw new Error("SOURCE_CHANNEL_IDS fehlt.");
 
 const client = new Client({
   intents: [
@@ -31,7 +38,7 @@ const client = new Client({
 const ALIASES = [
   { key: "Skeleton", names: ["skeleton", "skelly", "skelett", "skelet", "skele"] },
   { key: "Zombie", names: ["zombie", "zombies"] },
-  { key: "Creeper", names: ["creeper", "creeper"] },
+  { key: "Creeper", names: ["creeper"] },
   { key: "Blaze", names: ["blaze"] },
   { key: "Spider", names: ["spider", "spinne"] },
   { key: "Cave Spider", names: ["cave spider", "höhlenspinne", "hohlenspinne"] },
@@ -68,9 +75,9 @@ function detectSpawner(text) {
 function parsePrice(text) {
   const normalized = text.toLowerCase().replace(/,/g, ".");
   const patterns = [
-    /(?:^|\s)(\d+(?:\.\d+)?)\s*(mio|millionen|million|m)\b/,
-    /(?:^|\s)(\d+(?:\.\d+)?)\s*(k|tsd|tausend)\b/,
-    /(?:^|\s)(\d{1,3}(?:\.\d{3})+|\d{6,})\s*(?:\$|coins?|geld)?\b/,
+    /(\d+(?:\.\d+)?)\s*(mio|millionen|million|m)\b/,
+    /(\d+(?:\.\d+)?)\s*(k|tsd|tausend)\b/,
+    /(\d{1,3}(?:\.\d{3})+|\d{6,})\s*(?:\$|coins?|geld)?\b/,
   ];
   for (const regex of patterns) {
     const match = normalized.match(regex);
@@ -89,8 +96,8 @@ function parsePrice(text) {
 
 function isBuyOffer(text) {
   const t = normalizeText(text);
-  if (/\b(verkauf|verkaufe|verkaufen|verkauft|verkaufe|sell|selling|verkaufspreis)\b/.test(t)) return false;
-  return /\b(ankauf|kaufe|kaufen|suche|buy|buying|wir kaufen|ich kaufe)\b/.test(t);
+  if (/\b(verkauf|verkaufe|verkaufen|verkauft|sell|selling|verkaufspreis)\b/.test(t)) return false;
+  return /\b(ankauf|kaufe|kaufen|suche|buy|buying)\b/.test(t);
 }
 
 function formatMoney(value) {
@@ -99,7 +106,7 @@ function formatMoney(value) {
 
 async function fetchRecentMessages(channel) {
   let before;
-  let all = [];
+  const all = [];
   while (all.length < maxMessagesPerChannel) {
     const batch = await channel.messages.fetch({
       limit: Math.min(100, maxMessagesPerChannel - all.length),
@@ -142,9 +149,7 @@ async function collectOffers() {
             ourPrice: Math.max(0, price - undercut),
             source: channel.guild?.name || "Discord-Server",
             sourceNumber: sourceIndex + 1,
-            channelId,
             messageUrl: message.url,
-            createdTimestamp: message.createdTimestamp,
           });
         }
       }
@@ -155,10 +160,20 @@ async function collectOffers() {
   return { best, checked };
 }
 
+async function upsertEmbed(channel, title, embed) {
+  const recent = await channel.messages.fetch({ limit: 25 });
+  const previous = recent.find(m => m.author.id === client.user.id && m.embeds[0]?.title === title);
+  if (previous) await previous.edit({ embeds: [embed] });
+  else await channel.send({ embeds: [embed] });
+}
+
 async function publish() {
   const target = await client.channels.fetch(targetChannelId);
-  if (!target || !target.isTextBased() || !target.send) {
-    throw new Error("Ziel-Channel ist nicht lesbar/beschreibbar.");
+  const sourceInfo = await client.channels.fetch(sourceInfoChannelId);
+  for (const [label, channel] of [["Preis", target], ["Quellen", sourceInfo]]) {
+    if (!channel || !channel.isTextBased() || !channel.send || !channel.messages) {
+      throw new Error(label + "-Channel ist nicht lesbar/beschreibbar.");
+    }
   }
 
   const { best, checked } = await collectOffers();
@@ -175,19 +190,12 @@ async function publish() {
     .setDescription(description.slice(0, 4000))
     .addFields(
       { name: "Abzug", value: formatMoney(undercut), inline: true },
-      { name: "Quellkanäle geprüft", value: String(checked.length) + "/" + sourceChannelIds.length, inline: true },
+      { name: "Quellkanäle geprüft", value: checked.length + "/" + sourceChannelIds.length, inline: true },
       { name: "Letzter Check", value: new Date().toLocaleString("de-DE", { timeZone: "Europe/Berlin" }), inline: true },
     )
     .setFooter({ text: "Automatisch ermittelt · Preise vor dem Ankauf prüfen" });
+  await upsertEmbed(target, "💰 Spawner Tracker · Ankauf", embed);
 
-  const recent = await target.messages.fetch({ limit: 25 });
-  const previous = recent.find(m => m.author.id === client.user.id && m.embeds[0]?.title === "💰 Spawner Tracker · Ankauf");
-  if (previous) await previous.edit({ embeds: [embed] });
-  else await target.send({ embeds: [embed] });
-  const sourceInfo = await client.channels.fetch(sourceInfoChannelId);
-  if (!sourceInfo || !sourceInfo.isTextBased() || !sourceInfo.send) {
-    throw new Error("SOURCE_INFO_CHANNEL_ID ist nicht lesbar/beschreibbar.");
-  }
   const sourceLines = sorted.length
     ? sorted.map(x =>
         `**${x.spawner}-Spawner:** Server ${x.sourceNumber}/${sourceChannelIds.length} (${x.source}) · ${formatMoney(x.marketPrice)} · [Quelle](${x.messageUrl})`
@@ -201,15 +209,8 @@ async function publish() {
       { name: "Server geprüft", value: checked.length + "/" + sourceChannelIds.length, inline: true },
       { name: "Letzter Check", value: new Date().toLocaleString("de-DE", { timeZone: "Europe/Berlin" }), inline: true },
     )
-    .setFooter({ text: "Server 1/5 bis 5/5 folgen der Reihenfolge deiner SOURCE_CHANNEL_IDS" });
-
-  const sourceRecent = await sourceInfo.messages.fetch({ limit: 25 });
-  const previousSource = sourceRecent.find(m =>
-    m.author.id === client.user.id && m.embeds[0]?.title === "🔎 Spawner Tracker · Preisquellen"
-  );
-  if (previousSource) await previousSource.edit({ embeds: [sourceEmbed] });
-  else await sourceInfo.send({ embeds: [sourceEmbed] });
-
+    .setFooter({ text: "Server 1/5 bis 5/5 folgen der Reihenfolge deiner Quell-Channel-IDs" });
+  await upsertEmbed(sourceInfo, "🔎 Spawner Tracker · Preisquellen", sourceEmbed);
   console.log(`Update fertig: ${sorted.length} Spawner, ${checked.length} Quellkanäle.`);
 }
 
