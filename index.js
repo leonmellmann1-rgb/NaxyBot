@@ -1,223 +1,210 @@
 const {
   Client,
   GatewayIntentBits,
-  Partials,
-  EmbedBuilder,
-} = require("discord.js");
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+  EmbedBuilder
+} = require('discord.js');
 
 const token = process.env.DISCORD_TOKEN;
-const targetChannelId = process.env.TARGET_CHANNEL_ID || "1567628840619221042";
-const sourceInfoChannelId = process.env.SOURCE_INFO_CHANNEL_ID;
-const configuredSourceChannelIds = [
-  "1520163833887330427",
-  "1485005896038875221",
-  "1513500032328925286",
-  "1488169399897559172",
-  "1504584976656761013",
-];
-const sourceChannelIds = (process.env.SOURCE_CHANNEL_IDS || configuredSourceChannelIds.join(","))
-  .split(",").map(x => x.trim()).filter(Boolean);
-const scanIntervalMinutes = Math.max(1, Number(process.env.SCAN_INTERVAL_MINUTES || 2));
-const maxMessagesPerChannel = Math.min(500, Math.max(20, Number(process.env.MAX_MESSAGES_PER_CHANNEL || 150)));
-const undercut = 1_000_000;
+const clientId = process.env.CLIENT_ID;
+const guildId = process.env.GUILD_ID;
 
-if (!token) throw new Error("DISCORD_TOKEN fehlt.");
-if (!targetChannelId) throw new Error("TARGET_CHANNEL_ID fehlt.");
-if (!sourceInfoChannelId) throw new Error("SOURCE_INFO_CHANNEL_ID fehlt.");
-if (sourceChannelIds.length === 0) throw new Error("SOURCE_CHANNEL_IDS fehlt.");
+if (!token || !clientId) {
+  console.error('Fehler: DISCORD_TOKEN und CLIENT_ID müssen gesetzt sein.');
+  process.exit(1);
+}
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName('clear')
+    .setDescription('Löscht eine bestimmte Anzahl Nachrichten.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .addIntegerOption(option =>
+      option.setName('anzahl')
+        .setDescription('Anzahl der Nachrichten (1 bis 100)')
+        .setMinValue(1)
+        .setMaxValue(100)
+        .setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('kick')
+    .setDescription('Wirft ein Mitglied vom Server.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers)
+    .addUserOption(option => option.setName('mitglied').setDescription('Mitglied').setRequired(true))
+    .addStringOption(option => option.setName('grund').setDescription('Grund').setMaxLength(500)),
+  new SlashCommandBuilder()
+    .setName('ban')
+    .setDescription('Bannt ein Mitglied vom Server.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
+    .addUserOption(option => option.setName('mitglied').setDescription('Mitglied').setRequired(true))
+    .addStringOption(option => option.setName('grund').setDescription('Grund').setMaxLength(500)),
+  new SlashCommandBuilder()
+    .setName('timeout')
+    .setDescription('Gibt einem Mitglied einen Timeout.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
+    .addUserOption(option => option.setName('mitglied').setDescription('Mitglied').setRequired(true))
+    .addIntegerOption(option => option.setName('minuten').setDescription('Dauer in Minuten (1 bis 40320)').setMinValue(1).setMaxValue(40320).setRequired(true))
+    .addStringOption(option => option.setName('grund').setDescription('Grund').setMaxLength(500)),
+  new SlashCommandBuilder()
+    .setName('untimeout')
+    .setDescription('Entfernt den Timeout eines Mitglieds.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
+    .addUserOption(option => option.setName('mitglied').setDescription('Mitglied').setRequired(true)),
+  new SlashCommandBuilder().setName('ping').setDescription('Zeigt die Bot-Latenz.'),
+  new SlashCommandBuilder().setName('help').setDescription('Zeigt alle NAXY Helper-Befehle.')
+].map(command => command.toJSON());
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-  partials: [Partials.Channel, Partials.Message],
+  intents: [GatewayIntentBits.Guilds]
 });
 
-const ALIASES = [
-  { key: "Skeleton", names: ["skeleton", "skelly", "skelett", "skelet", "skele"] },
-  { key: "Zombie", names: ["zombie", "zombies"] },
-  { key: "Creeper", names: ["creeper"] },
-  { key: "Blaze", names: ["blaze"] },
-  { key: "Spider", names: ["spider", "spinne"] },
-  { key: "Cave Spider", names: ["cave spider", "höhlenspinne", "hohlenspinne"] },
-  { key: "Enderman", names: ["enderman", "endermen"] },
-  { key: "Pig", names: ["pig", "schwein"] },
-  { key: "Cow", names: ["cow", "kuh"] },
-  { key: "Iron Golem", names: ["iron golem", "eisengolem"] },
-  { key: "Witch", names: ["witch", "hexe"] },
-  { key: "Guardian", names: ["guardian"] },
-  { key: "Slime", names: ["slime"] },
-  { key: "Magma Cube", names: ["magma cube", "magmacube"] },
-  { key: "Wither Skeleton", names: ["wither skeleton", "wither-skelett"] },
-  { key: "Phantom", names: ["phantom"] },
-  { key: "Drowned", names: ["drowned", "ertrunkener"] },
-  { key: "Husk", names: ["husk"] },
-  { key: "Villager", names: ["villager", "dorfbewohner"] },
-];
+const rest = new REST({ version: '10' }).setToken(token);
 
-function normalizeText(value) {
-  return value.toLowerCase()
-    .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
-    .replace(/[^a-z0-9]+/g, " ").trim();
+async function registerCommands() {
+  const route = guildId
+    ? Routes.applicationGuildCommands(clientId, guildId)
+    : Routes.applicationCommands(clientId);
+
+  await rest.put(route, { body: commands });
+  console.log(guildId
+    ? 'Slash-Commands für den Testserver registriert.'
+    : 'Globale Slash-Commands registriert.');
 }
 
-function detectSpawner(text) {
-  const normalized = normalizeText(text);
-  if (!/spawner|spaw.?ner/.test(normalized)) return null;
-  for (const entry of ALIASES) {
-    if (entry.names.some(name => normalized.includes(normalizeText(name)))) return entry.key;
+function canModerate(interaction, targetMember, permission) {
+  if (!interaction.memberPermissions?.has(permission)) return 'Dir fehlt die benötigte Berechtigung.';
+  if (!targetMember) return 'Dieses Mitglied ist nicht mehr auf dem Server.';
+  if (targetMember.id === interaction.guild.ownerId) return 'Der Serverinhaber kann nicht moderiert werden.';
+  if (targetMember.id === interaction.user.id) return 'Du kannst dich nicht selbst moderieren.';
+  const moderator = interaction.guild.members.me;
+  if (moderator && targetMember.roles.highest.position >= moderator.roles.highest.position) {
+    return 'Die Rolle des Mitglieds ist gleich hoch oder höher als meine höchste Rolle.';
+  }
+  const actor = awaitableMember(interaction);
+  if (actor && interaction.user.id !== interaction.guild.ownerId &&
+      targetMember.roles.highest.position >= actor.roles.highest.position) {
+    return 'Die Rolle des Mitglieds ist gleich hoch oder höher als deine höchste Rolle.';
   }
   return null;
 }
 
-function parsePrice(text) {
-  const normalized = text.toLowerCase().replace(/,/g, ".");
-  const patterns = [
-    /(\d+(?:\.\d+)?)\s*(mio|millionen|million|m)\b/,
-    /(\d+(?:\.\d+)?)\s*(k|tsd|tausend)\b/,
-    /(\d{1,3}(?:\.\d{3})+|\d{6,})\s*(?:\$|coins?|geld)?\b/,
-  ];
-  for (const regex of patterns) {
-    const match = normalized.match(regex);
-    if (!match) continue;
-    const amount = Number(match[1]);
-    if (!Number.isFinite(amount)) continue;
-    const unit = match[2] || "";
-    const multiplier = ["m", "mio", "million", "millionen"].includes(unit)
-      ? 1_000_000
-      : ["k", "tsd", "tausend"].includes(unit) ? 1_000 : 1;
-    const value = Math.round(amount * multiplier);
-    if (value > 0 && value < 1_000_000_000_000) return value;
-  }
-  return null;
+function awaitableMember(interaction) {
+  return interaction.member?.roles?.highest ? interaction.member : null;
 }
 
-function isBuyOffer(text) {
-  const t = normalizeText(text);
-  if (/\b(verkauf|verkaufe|verkaufen|verkauft|sell|selling|verkaufspreis)\b/.test(t)) return false;
-  return /\b(ankauf|kaufe|kaufen|suche|buy|buying)\b/.test(t);
-}
-
-function formatMoney(value) {
-  return value.toLocaleString("de-DE") + " $";
-}
-
-async function fetchRecentMessages(channel) {
-  let before;
-  const all = [];
-  while (all.length < maxMessagesPerChannel) {
-    const batch = await channel.messages.fetch({
-      limit: Math.min(100, maxMessagesPerChannel - all.length),
-      ...(before ? { before } : {}),
-    });
-    if (batch.size === 0) break;
-    all.push(...batch.values());
-    before = batch.last().id;
-    if (batch.size < 100) break;
-  }
-  return all;
-}
-
-async function collectOffers() {
-  const best = new Map();
-  const checked = [];
-  for (const [sourceIndex, channelId] of sourceChannelIds.entries()) {
-    try {
-      const channel = await client.channels.fetch(channelId);
-      if (!channel || !channel.isTextBased() || !channel.messages) {
-        console.warn("Kein lesbarer Textkanal:", channelId);
-        continue;
-      }
-      checked.push(channelId);
-      const messages = await fetchRecentMessages(channel);
-      for (const message of messages) {
-        const text = [message.content, ...message.embeds.map(e =>
-          [e.title, e.description, ...(e.fields || []).flatMap(f => [f.name, f.value])]
-            .filter(Boolean).join(" ")
-        )].filter(Boolean).join(" ");
-        if (!isBuyOffer(text)) continue;
-        const spawner = detectSpawner(text);
-        const price = parsePrice(text);
-        if (!spawner || !price) continue;
-        const current = best.get(spawner);
-        if (!current || price > current.marketPrice) {
-          best.set(spawner, {
-            spawner,
-            marketPrice: price,
-            ourPrice: Math.max(0, price - undercut),
-            source: channel.guild?.name || "Discord-Server",
-            sourceNumber: sourceIndex + 1,
-            messageUrl: message.url,
-          });
-        }
-      }
-    } catch (error) {
-      console.error("Fehler beim Lesen von Channel", channelId, error.message);
-    }
-  }
-  return { best, checked };
-}
-
-async function upsertEmbed(channel, title, embed) {
-  const recent = await channel.messages.fetch({ limit: 25 });
-  const previous = recent.find(m => m.author.id === client.user.id && m.embeds[0]?.title === title);
-  if (previous) await previous.edit({ embeds: [embed] });
-  else await channel.send({ embeds: [embed] });
-}
-
-async function publish() {
-  const target = await client.channels.fetch(targetChannelId);
-  const sourceInfo = await client.channels.fetch(sourceInfoChannelId);
-  for (const [label, channel] of [["Preis", target], ["Quellen", sourceInfo]]) {
-    if (!channel || !channel.isTextBased() || !channel.send || !channel.messages) {
-      throw new Error(label + "-Channel ist nicht lesbar/beschreibbar.");
-    }
-  }
-
-  const { best, checked } = await collectOffers();
-  const sorted = [...best.values()].sort((a, b) => a.spawner.localeCompare(b.spawner, "de"));
-  const description = sorted.length
-    ? sorted.map(x =>
-        `**${x.spawner}-Spawner**\nUnser Ankauf: **${formatMoney(x.ourPrice)}** · höchstes gefundenes Angebot: ${formatMoney(x.marketPrice)}\nQuelle: Server ${x.sourceNumber}/${sourceChannelIds.length} · [Nachricht öffnen](${x.messageUrl})`
-      ).join("\n\n")
-    : "Noch keine passenden Ankaufangebote gefunden. Prüfe Quell-Channel-IDs und Leseberechtigungen.";
-
-  const embed = new EmbedBuilder()
-    .setTitle("💰 Spawner Tracker · Ankauf")
-    .setColor(0x7c3aed)
-    .setDescription(description.slice(0, 4000))
-    .addFields(
-      { name: "Abzug", value: formatMoney(undercut), inline: true },
-      { name: "Quellkanäle geprüft", value: checked.length + "/" + sourceChannelIds.length, inline: true },
-      { name: "Letzter Check", value: new Date().toLocaleString("de-DE", { timeZone: "Europe/Berlin" }), inline: true },
-    )
-    .setFooter({ text: "Automatisch ermittelt · Preise vor dem Ankauf prüfen" });
-  await upsertEmbed(target, "💰 Spawner Tracker · Ankauf", embed);
-
-  const sourceLines = sorted.length
-    ? sorted.map(x =>
-        `**${x.spawner}-Spawner:** Server ${x.sourceNumber}/${sourceChannelIds.length} (${x.source}) · ${formatMoney(x.marketPrice)} · [Quelle](${x.messageUrl})`
-      ).join("\n")
-    : "Noch keine passenden Ankaufangebote gefunden.";
-  const sourceEmbed = new EmbedBuilder()
-    .setTitle("🔎 Spawner Tracker · Preisquellen")
-    .setColor(0x2563eb)
-    .setDescription(sourceLines.slice(0, 4000))
-    .addFields(
-      { name: "Server geprüft", value: checked.length + "/" + sourceChannelIds.length, inline: true },
-      { name: "Letzter Check", value: new Date().toLocaleString("de-DE", { timeZone: "Europe/Berlin" }), inline: true },
-    )
-    .setFooter({ text: "Server 1/5 bis 5/5 folgen der Reihenfolge deiner Quell-Channel-IDs" });
-  await upsertEmbed(sourceInfo, "🔎 Spawner Tracker · Preisquellen", sourceEmbed);
-  console.log(`Update fertig: ${sorted.length} Spawner, ${checked.length} Quellkanäle.`);
-}
-
-client.once("ready", async () => {
-  console.log(`Spawner Tracker online als ${client.user.tag}`);
-  try { await publish(); } catch (e) { console.error("Erstes Update fehlgeschlagen:", e); }
-  setInterval(() => publish().catch(e => console.error("Update fehlgeschlagen:", e)), scanIntervalMinutes * 60 * 1000);
+client.once('ready', () => {
+  console.log(`NAXY Helper ist online als ${client.user.tag}`);
 });
 
-client.login(token);
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  try {
+    const { commandName } = interaction;
+
+    if (commandName === 'ping') {
+      return interaction.reply({ content: `Pong! API-Latenz: ${client.ws.ping} ms`, ephemeral: true });
+    }
+
+    if (commandName === 'help') {
+      const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('NAXY Helper – Befehle')
+        .setDescription([
+          '`/clear anzahl` – Nachrichten löschen',
+          '`/kick mitglied [grund]` – Mitglied kicken',
+          '`/ban mitglied [grund]` – Mitglied bannen',
+          '`/timeout mitglied minuten [grund]` – Timeout setzen',
+          '`/untimeout mitglied` – Timeout entfernen',
+          '`/ping` – Bot-Latenz anzeigen',
+          '`/help` – Diese Hilfe anzeigen'
+        ].join('\n'))
+        .setFooter({ text: 'Weitere Module wie Giveaways, Rollenpanels und Claims folgen.' });
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    if (!interaction.inGuild()) {
+      return interaction.reply({ content: 'Dieser Befehl funktioniert nur auf einem Server.', ephemeral: true });
+    }
+
+    if (commandName === 'clear') {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages)) {
+        return interaction.reply({ content: 'Dir fehlt „Nachrichten verwalten“.', ephemeral: true });
+      }
+      if (!interaction.appPermissions?.has(PermissionFlagsBits.ManageMessages)) {
+        return interaction.reply({ content: 'Mir fehlt „Nachrichten verwalten“.', ephemeral: true });
+      }
+      const amount = interaction.options.getInteger('anzahl', true);
+      await interaction.deferReply({ ephemeral: true });
+      const deleted = await interaction.channel.bulkDelete(amount, true);
+      return interaction.editReply(`${deleted.size} Nachrichten gelöscht. Nachrichten älter als 14 Tage können nicht per Bulk-Löschung entfernt werden.`);
+    }
+
+    const target = interaction.options.getUser('mitglied', true);
+    const targetMember = await interaction.guild.members.fetch(target.id).catch(() => null);
+    const actionPermission = commandName === 'kick'
+      ? PermissionFlagsBits.KickMembers
+      : commandName === 'ban'
+        ? PermissionFlagsBits.BanMembers
+        : PermissionFlagsBits.ModerateMembers;
+
+    const permissionError = canModerate(interaction, targetMember, actionPermission);
+    if (permissionError) return interaction.reply({ content: permissionError, ephemeral: true });
+
+    if (commandName === 'kick') {
+      if (!interaction.appPermissions?.has(PermissionFlagsBits.KickMembers)) {
+        return interaction.reply({ content: 'Mir fehlt „Mitglieder kicken“.', ephemeral: true });
+      }
+      const reason = interaction.options.getString('grund') || 'Kein Grund angegeben';
+      await targetMember.kick(`${interaction.user.tag}: ${reason}`);
+      return interaction.reply({ content: `👢 ${target.tag} wurde gekickt. Grund: ${reason}`, ephemeral: true });
+    }
+
+    if (commandName === 'ban') {
+      if (!interaction.appPermissions?.has(PermissionFlagsBits.BanMembers)) {
+        return interaction.reply({ content: 'Mir fehlt „Mitglieder bannen“.', ephemeral: true });
+      }
+      const reason = interaction.options.getString('grund') || 'Kein Grund angegeben';
+      await interaction.guild.members.ban(target.id, { reason: `${interaction.user.tag}: ${reason}` });
+      return interaction.reply({ content: `🔨 ${target.tag} wurde gebannt. Grund: ${reason}`, ephemeral: true });
+    }
+
+    if (commandName === 'timeout') {
+      if (!interaction.appPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+        return interaction.reply({ content: 'Mir fehlt „Mitglieder moderieren“.', ephemeral: true });
+      }
+      const minutes = interaction.options.getInteger('minuten', true);
+      const reason = interaction.options.getString('grund') || 'Kein Grund angegeben';
+      await targetMember.timeout(minutes * 60 * 1000, `${interaction.user.tag}: ${reason}`);
+      return interaction.reply({ content: `⏳ ${target.tag} hat einen Timeout für ${minutes} Minuten erhalten.`, ephemeral: true });
+    }
+
+    if (commandName === 'untimeout') {
+      if (!interaction.appPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+        return interaction.reply({ content: 'Mir fehlt „Mitglieder moderieren“.', ephemeral: true });
+      }
+      await targetMember.timeout(null, `${interaction.user.tag}: Timeout entfernt`);
+      return interaction.reply({ content: `✅ Timeout von ${target.tag} wurde entfernt.`, ephemeral: true });
+    }
+  } catch (error) {
+    console.error('Command-Fehler:', error);
+    const message = 'Beim Ausführen des Befehls ist ein Fehler aufgetreten. Prüfe Bot-Rechte und Rollenposition.';
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ content: message, ephemeral: true }).catch(() => {});
+    } else {
+      await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
+    }
+  }
+});
+
+(async () => {
+  try {
+    await registerCommands();
+    await client.login(token);
+  } catch (error) {
+    console.error('Startfehler:', error);
+    process.exit(1);
+  }
+})();
