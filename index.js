@@ -51,6 +51,7 @@ function gwEmbed(g) {
     .setDescription(g.description || 'Klicke auf Mitmachen, um teilzunehmen.')
     .addFields(
       { name: 'Teilnehmer', value: String(g.participants.length), inline: true },
+      { name: 'Gewinner', value: String((g.claimedWinners || []).length) + '/' + String(g.winnerCount || 1), inline: true },
       { name: 'Endet', value: '<t:' + Math.floor(g.endsAt / 1000) + ':R>', inline: true },
       { name: 'Claim-Frist', value: g.claimMinutes + ' Minuten', inline: true }
     ).setFooter({ text: 'Giveaway-ID: ' + g.id });
@@ -75,7 +76,9 @@ async function createPrivateChannel(guild, user, name, topic) {
 async function createClaim(guild, g, user) {
   const slug = user.username.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 16) || 'gewinner';
   const ch = await createPrivateChannel(guild, user, 'giveaway-claim-' + slug, 'Giveaway Claim ' + g.id + ' für ' + user.tag);
-  g.status = 'claimed';
+  g.claimedWinners ||= [];
+  if (!g.claimedWinners.includes(user.id)) g.claimedWinners.push(user.id);
+  g.status = 'drawing';
   g.claimChannelId = ch.id;
   g.claimedBy = user.id;
   save();
@@ -97,32 +100,52 @@ async function disableWinnerDM(g, user, label) {
   }).catch(() => {});
 }
 async function drawWinner(guild, g, reason) {
-  if (g.winnerId) {
+  // A winner who declines, requests a reroll, or misses the claim deadline is excluded.
+  if (g.winnerId && g.status === 'awaiting_claim') {
     g.excluded ||= [];
     if (!g.excluded.includes(g.winnerId)) g.excluded.push(g.winnerId);
     const old = await client.users.fetch(g.winnerId).catch(() => null);
     if (old) await disableWinnerDM(g, old, reason || 'Neuauslosung.');
   }
-  const pool = g.participants.filter(uid => !(g.excluded || []).includes(uid));
+
+  g.claimedWinners ||= [];
+  g.excluded ||= [];
+  g.winnerCount = Math.max(1, Number(g.winnerCount) || 1);
   g.winnerId = null;
   g.winnerDmMessageId = null;
   g.claimExpiresAt = null;
+
+  if (g.claimedWinners.length >= g.winnerCount) {
+    g.status = 'finished';
+    save();
+    await updateGw(guild, g);
+    const doneChannel = await channelById(guild, g.channelId);
+    if (doneChannel) await doneChannel.send('🎉 Alle ' + g.claimedWinners.length + ' Gewinner haben ihren Gewinn beansprucht!');
+    return;
+  }
+
+  const pool = g.participants.filter(uid =>
+    !g.excluded.includes(uid) && !g.claimedWinners.includes(uid)
+  );
   if (!pool.length) {
     g.status = 'finished_no_winner';
     save();
     await updateGw(guild, g);
     const ch = await channelById(guild, g.channelId);
-    if (ch) await ch.send('Giveaway beendet: Es gibt keinen weiteren verfügbaren Teilnehmer.');
+    if (ch) await ch.send('Giveaway beendet: Es gibt keine weiteren verfügbaren Teilnehmer.');
     return;
   }
+
   const winnerId = pool[Math.floor(Math.random() * pool.length)];
   g.winnerId = winnerId;
   g.status = 'awaiting_claim';
   g.claimExpiresAt = Date.now() + g.claimMinutes * 60000;
   save();
   await updateGw(guild, g);
+
   const publicChannel = await channelById(guild, g.channelId);
   if (publicChannel) await publicChannel.send('🎉 Glückwunsch <@' + winnerId + '>! Du hast **' + g.prize + '** gewonnen. Prüfe deine DMs.');
+
   const user = await client.users.fetch(winnerId).catch(() => null);
   if (!user) return drawWinner(guild, g, 'Der Gewinner konnte nicht erreicht werden.');
   const dm = await user.send({
@@ -139,7 +162,9 @@ async function drawWinner(guild, g, reason) {
   save();
   setTimeout(async () => {
     const freshGuild = await client.guilds.fetch(g.guildId).catch(() => null);
-    if (freshGuild && g.status === 'awaiting_claim' && g.winnerId === winnerId) await drawWinner(freshGuild, g, 'Claim-Frist abgelaufen.');
+    if (freshGuild && g.status === 'awaiting_claim' && g.winnerId === winnerId) {
+      await drawWinner(freshGuild, g, 'Claim-Frist abgelaufen.');
+    }
   }, Math.max(0, Math.min(2147480000, g.claimExpiresAt - Date.now())));
 }
 function scheduleGw(g) {
@@ -207,7 +232,18 @@ const commands = [
     .addStringOption(o => o.setName('text').setDescription('Button-Text').setMaxLength(70)),
   new SlashCommandBuilder().setName('ticket-setup').setDescription('Erstellt das Support-Panel.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-  new SlashCommandBuilder().setName('ticket-close').setDescription('Schließt das Ticket in diesem Kanal.')
+  new SlashCommandBuilder().setName('ticket-close').setDescription('Schließt das Ticket in diesem Kanal.'),
+  new SlashCommandBuilder().setName('say').setDescription('Sendet eine Team-Nachricht als Bot.')
+    .addStringOption(o => o.setName('nachricht').setDescription('Nachrichtentext').setMaxLength(2000).setRequired(true))
+    .addChannelOption(o => o.setName('kanal').setDescription('Zielkanal').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
+    .addAttachmentOption(o => o.setName('bild').setDescription('Optionales Bild')),
+  new SlashCommandBuilder().setName('sayembed').setDescription('Sendet eine formatierte Embed-Nachricht als Bot.')
+    .addStringOption(o => o.setName('titel').setDescription('Titel').setMaxLength(256).setRequired(true))
+    .addStringOption(o => o.setName('beschreibung').setDescription('Beschreibung').setMaxLength(4000))
+    .addStringOption(o => o.setName('farbe').setDescription('Hex-Farbe, z. B. #5865F2').setMaxLength(7))
+    .addStringOption(o => o.setName('bild_url').setDescription('HTTPS-Bildlink').setMaxLength(500))
+    .addAttachmentOption(o => o.setName('bild').setDescription('Alternativ Bild hochladen'))
+    .addChannelOption(o => o.setName('kanal').setDescription('Zielkanal').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
 ].map(c => c.toJSON());
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
@@ -256,7 +292,7 @@ client.on('interactionCreate', async i => {
       const n = i.commandName;
       if (n === 'ping') return i.reply({ content: 'Pong! API-Latenz: ' + client.ws.ping + ' ms', ephemeral: true });
       if (n === 'help') return i.reply({ embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('NAXY Helper')
-        .setDescription('**Moderation**\n/clear · /kick · /ban · /timeout · /untimeout\n\n**Giveaways**\n/giveaway-request · /endgiveaway · /reroll\n\n**Server**\n/welcome-setup · /rolepanel · /ticket-setup · /ticket-close · /serverinfo')], ephemeral: true });
+        .setDescription('**Moderation**\n/clear · /kick · /ban · /timeout · /untimeout\n\n**Giveaways**\n/giveaway-request · /endgiveaway · /reroll\n\n**Server**\n/welcome-setup · /rolepanel · /ticket-setup · /ticket-close · /serverinfo\n\n**Nachrichten**\n/say · /sayembed')], ephemeral: true });
       if (!i.inGuild()) return i.reply({ content: 'Nur auf einem Server nutzbar.', ephemeral: true });
 
       if (n === 'serverinfo') return i.reply({ embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle(i.guild.name)
@@ -264,6 +300,50 @@ client.on('interactionCreate', async i => {
           { name: 'Mitglieder', value: String(i.guild.memberCount), inline: true },
           { name: 'Erstellt', value: '<t:' + Math.floor(i.guild.createdTimestamp / 1000) + ':D>', inline: true },
           { name: 'Server-ID', value: i.guild.id })], ephemeral: true });
+
+      if (n === 'say' || n === 'sayembed') {
+        if (!team(i)) return i.reply({ content: 'Nur das Team darf /say und /sayembed verwenden.', ephemeral: true });
+        const target = i.options.getChannel('kanal') || i.channel;
+        if (!target || !target.isTextBased() || typeof target.send !== 'function') {
+          return i.reply({ content: 'Der ausgewählte Kanal kann keine Nachrichten empfangen.', ephemeral: true });
+        }
+        const perms = target.permissionsFor(i.guild.members.me);
+        if (!perms?.has(PermissionFlagsBits.SendMessages)) {
+          return i.reply({ content: 'Mir fehlt im Zielkanal die Berechtigung „Nachrichten senden“.', ephemeral: true });
+        }
+        await i.deferReply({ ephemeral: true });
+        if (n === 'say') {
+          const content = i.options.getString('nachricht', true);
+          const image = i.options.getAttachment('bild');
+          if (image && !perms.has(PermissionFlagsBits.AttachFiles)) {
+            return i.editReply('Mir fehlt im Zielkanal die Berechtigung „Dateien anhängen“.');
+          }
+          await target.send({ content, files: image ? [image.url] : [] });
+          return i.editReply('Nachricht wurde in ' + target.toString() + ' gesendet.');
+        }
+
+        const title = i.options.getString('titel', true);
+        const description = i.options.getString('beschreibung');
+        const rawColor = i.options.getString('farbe') || '#5865F2';
+        const imageUrl = i.options.getString('bild_url');
+        const imageAttachment = i.options.getAttachment('bild');
+        if (!/^#?[0-9a-fA-F]{6}$/.test(rawColor)) {
+          return i.editReply('Ungültige Farbe. Nutze sechs Hex-Zeichen, zum Beispiel #5865F2.');
+        }
+        if (imageUrl && !/^https:\/\//i.test(imageUrl)) {
+          return i.editReply('Der Bildlink muss mit https:// beginnen.');
+        }
+        if (!perms.has(PermissionFlagsBits.EmbedLinks)) {
+          return i.editReply('Mir fehlt im Zielkanal die Berechtigung „Links einbetten“.');
+        }
+        const embed = new EmbedBuilder().setColor(parseInt(rawColor.replace('#', ''), 16)).setTitle(title);
+        if (description) embed.setDescription(description);
+        if (imageAttachment || imageUrl) {
+          embed.setImage(imageAttachment ? imageAttachment.url : imageUrl);
+        }
+        await target.send({ embeds: [embed] });
+        return i.editReply('Embed wurde in ' + target.toString() + ' gesendet.');
+      }
 
       if (n === 'clear') {
         if (!i.memberPermissions?.has(PermissionFlagsBits.ManageMessages) || !i.appPermissions?.has(PermissionFlagsBits.ManageMessages)) return i.reply({ content: 'Dir oder mir fehlt „Nachrichten verwalten“.', ephemeral: true });
@@ -376,7 +456,8 @@ client.on('interactionCreate', async i => {
         const modal = new ModalBuilder().setCustomId('gw_config:' + key).setTitle('Giveaway einstellen');
         modal.addComponents(
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Laufzeit in Minuten').setPlaceholder('z. B. 1440').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('claim').setLabel('Claim-Frist in Minuten').setPlaceholder('z. B. 60').setStyle(TextInputStyle.Short).setRequired(true))
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('claim').setLabel('Claim-Frist in Minuten').setPlaceholder('z. B. 60').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('winners').setLabel('Anzahl der Gewinner (1–10)').setPlaceholder('z. B. 1').setStyle(TextInputStyle.Short).setRequired(true))
         );
         return i.showModal(modal);
       }
@@ -399,7 +480,11 @@ client.on('interactionCreate', async i => {
         const dmSent = await i.user.send({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('Du bist dabei! 🎉')
           .setDescription('Du nimmst an **' + g.prize + '** teil. Du kannst deine Teilnahme hier zurückziehen.')],
           components: [new ActionRowBuilder().addComponents(button('gw_leave:' + key, 'Teilnahme verlassen', ButtonStyle.Danger))] }).then(() => true).catch(() => false);
-        return i.reply({ content: dmSent ? 'Du bist dabei! Deine private DM mit dem Button zum Verlassen wurde gesendet.' : 'Du bist dabei! Deine DMs sind geschlossen, deshalb kannst du nur hier teilnehmen.', ephemeral: true });
+        return i.reply({
+          content: dmSent ? 'Du bist dabei! Du kannst deine Teilnahme hier oder per DM verlassen.' : 'Du bist dabei! Du kannst deine Teilnahme über diesen Button verlassen.',
+          components: [new ActionRowBuilder().addComponents(button('gw_leave:' + key, 'Teilnahme verlassen', ButtonStyle.Danger))],
+          ephemeral: true
+        });
       }
       if (action === 'gw_leave') {
         const g = data.giveaways[key];
@@ -417,6 +502,18 @@ client.on('interactionCreate', async i => {
         const guild = await client.guilds.fetch(g.guildId);
         const ch = await createClaim(guild, g, i.user);
         await disableWinnerDM(g, i.user, 'Gewinn beansprucht. Claim-Kanal: ' + ch.name);
+        g.winnerId = null;
+        g.winnerDmMessageId = null;
+        if (g.claimedWinners.length < (g.winnerCount || 1)) {
+          save();
+          await drawWinner(guild, g, 'Der nächste Gewinner wird gezogen.');
+        } else {
+          g.status = 'finished';
+          save();
+          await updateGw(guild, g);
+          const publicChannel = await channelById(guild, g.channelId);
+          if (publicChannel) await publicChannel.send('🎉 Alle ' + g.claimedWinners.length + ' Gewinner haben ihren Gewinn beansprucht!');
+        }
         await i.followUp({ content: 'Dein privater Claim-Kanal wurde erstellt: ' + ch.toString() }).catch(() => {});
         return;
       }
@@ -489,13 +586,14 @@ client.on('interactionCreate', async i => {
         if (!req || req.status !== 'pending') return i.reply({ content: 'Anfrage nicht mehr offen.', ephemeral: true });
         const duration = Number(i.fields.getTextInputValue('duration'));
         const claimMinutes = Number(i.fields.getTextInputValue('claim'));
-        if (!Number.isInteger(duration) || duration < 1 || duration > 43200 || !Number.isInteger(claimMinutes) || claimMinutes < 1 || claimMinutes > 10080) {
-          return i.reply({ content: 'Laufzeit: 1–43200 Minuten. Claim-Frist: 1–10080 Minuten.', ephemeral: true });
+        const winnerCount = Number(i.fields.getTextInputValue('winners'));
+        if (!Number.isInteger(duration) || duration < 1 || duration > 43200 || !Number.isInteger(claimMinutes) || claimMinutes < 1 || claimMinutes > 10080 || !Number.isInteger(winnerCount) || winnerCount < 1 || winnerCount > 10) {
+          return i.reply({ content: 'Laufzeit: 1–43200 Minuten. Claim-Frist: 1–10080 Minuten. Gewinner: 1–10.', ephemeral: true });
         }
         const postChannel = await channelById(i.guild, GIVEAWAY_CHANNEL_ID) || i.channel;
         const g = { id: rid, guildId: i.guild.id, prize: req.prize, description: req.description,
-          creatorId: req.userId, channelId: postChannel.id, participants: [], excluded: [],
-          status: 'active', endsAt: Date.now() + duration * 60000, claimMinutes };
+          creatorId: req.userId, channelId: postChannel.id, participants: [], excluded: [], claimedWinners: [],
+          winnerCount, status: 'active', endsAt: Date.now() + duration * 60000, claimMinutes };
         data.giveaways[rid] = g; req.status = 'approved'; save();
         const msg = await postChannel.send({ embeds: [gwEmbed(g)], components: [new ActionRowBuilder().addComponents(button('gw_join:' + rid, 'Mitmachen', ButtonStyle.Success, '🎉'))] });
         g.messageId = msg.id; save(); scheduleGw(g);
