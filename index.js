@@ -58,7 +58,7 @@ function gwEmbed(g) {
 }
 function parseDuration(input) {
   const value = String(input || '').trim().toUpperCase();
-  const re = /(\d+)\s*(MIN(?:UTE|UTEN)?|M|H(?:OUR|OURS|STUNDE|STUNDEN)?|D(?:AY|AYS|TAG|TAGE|TAGS)?)/g;
+  const re = /(\d+)\s*(MIN(?:UTE|UTEN)?|M|H|HOUR|HOURS|STUNDE|STUNDEN|D|DAY|DAYS|TAG|TAGE|TAGS)/g;
   let match, total = 0, consumed = '', count = 0;
   while ((match = re.exec(value)) !== null) {
     const unit = match[2];
