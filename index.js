@@ -383,18 +383,38 @@ client.on('interactionCreate', async i => {
       if (n === 'giveaway-request') {
         const review = await channelById(i.guild, TEAM_REVIEW_CHANNEL_ID);
         if (!review) return i.reply({ content: 'TEAM_REVIEW_CHANNEL_ID ist beim Hoster noch nicht gesetzt.', ephemeral: true });
+        const target = i.options.getChannel('kanal') || i.channel;
+        if (!target || ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(target.type)) {
+          return i.reply({ content: 'Bitte wähle einen Text- oder Ankündigungskanal.', ephemeral: true });
+        }
         const rid = id();
         const req = { id: rid, guildId: i.guild.id, userId: i.user.id, userTag: i.user.tag,
-          prize: i.options.getString('gewinn', true), description: i.options.getString('beschreibung') || '', status: 'pending' };
+          prize: i.options.getString('gewinn', true), description: i.options.getString('beschreibung') || '',
+          publishChannelId: target.id, status: 'pending' };
+        const slug = i.user.username.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 14) || 'mitglied';
+        const privateChannel = await createPrivateChannel(i.guild, i.user, 'giveaway-anfrage-' + slug,
+          'Giveaway-Anfrage ' + rid + ' von ' + i.user.tag);
+        req.privateChannelId = privateChannel.id;
         data.requests[rid] = req;
         save();
-        await review.send({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('Giveaway-Anfrage')
-          .setDescription('**Gewinn:** ' + req.prize + '\n**Info:** ' + (req.description || 'Keine') + '\n**Von:** <@' + req.userId + '>')],
+        await privateChannel.send({
+          content: (TEAM_ROLE_ID ? '<@&' + TEAM_ROLE_ID + '> ' : '') + '<@' + i.user.id + '>',
+          embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('Giveaway-Anfrage')
+            .addFields(
+              { name: 'Gewinn', value: req.prize },
+              { name: 'Beschreibung', value: req.description || 'Keine zusätzlichen Infos' },
+              { name: 'Vorgesehener Veröffentlichungs-Kanal', value: target.toString() },
+              { name: 'Status', value: 'Wartet auf Prüfung durch das Team' }
+            )]
+        });
+        await review.send({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('Neue Giveaway-Anfrage')
+          .setDescription('**Gewinn:** ' + req.prize + '\\n**Info:** ' + (req.description || 'Keine') +
+            '\\n**Von:** <@' + req.userId + '>\\n**Zielkanal:** <#' + target.id + '>\\n**Privater Anfrage-Kanal:** <#' + privateChannel.id + '>')],
           components: [new ActionRowBuilder().addComponents(
             button('gw_approve:' + rid, 'Annehmen & einstellen', ButtonStyle.Success),
             button('gw_reject:' + rid, 'Ablehnen', ButtonStyle.Danger)
           )] });
-        return i.reply({ content: 'Deine Anfrage wurde an das Team gesendet.', ephemeral: true });
+        return i.reply({ content: 'Deine Anfrage wurde erstellt. Das Team prüft sie hier: ' + privateChannel.toString(), ephemeral: true });
       }
 
       if (n === 'endgiveaway' || n === 'reroll') {
