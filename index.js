@@ -73,25 +73,22 @@ async function registerCommands() {
     : 'Globale Slash-Commands registriert.');
 }
 
-function canModerate(interaction, targetMember, permission) {
+async function canModerate(interaction, targetMember, permission) {
   if (!interaction.memberPermissions?.has(permission)) return 'Dir fehlt die benötigte Berechtigung.';
   if (!targetMember) return 'Dieses Mitglied ist nicht mehr auf dem Server.';
   if (targetMember.id === interaction.guild.ownerId) return 'Der Serverinhaber kann nicht moderiert werden.';
   if (targetMember.id === interaction.user.id) return 'Du kannst dich nicht selbst moderieren.';
-  const moderator = interaction.guild.members.me;
-  if (moderator && targetMember.roles.highest.position >= moderator.roles.highest.position) {
+  const botMember = interaction.guild.members.me;
+  if (botMember && targetMember.roles.highest.position >= botMember.roles.highest.position) {
     return 'Die Rolle des Mitglieds ist gleich hoch oder höher als meine höchste Rolle.';
   }
-  const actor = awaitableMember(interaction);
-  if (actor && interaction.user.id !== interaction.guild.ownerId &&
-      targetMember.roles.highest.position >= actor.roles.highest.position) {
-    return 'Die Rolle des Mitglieds ist gleich hoch oder höher als deine höchste Rolle.';
+  if (interaction.user.id !== interaction.guild.ownerId) {
+    const actorMember = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    if (actorMember && targetMember.roles.highest.position >= actorMember.roles.highest.position) {
+      return 'Die Rolle des Mitglieds ist gleich hoch oder höher als deine höchste Rolle.';
+    }
   }
   return null;
-}
-
-function awaitableMember(interaction) {
-  return interaction.member?.roles?.highest ? interaction.member : null;
 }
 
 client.once('ready', () => {
@@ -150,7 +147,7 @@ client.on('interactionCreate', async interaction => {
         ? PermissionFlagsBits.BanMembers
         : PermissionFlagsBits.ModerateMembers;
 
-    const permissionError = canModerate(interaction, targetMember, actionPermission);
+    const permissionError = await canModerate(interaction, targetMember, actionPermission);
     if (permissionError) return interaction.reply({ content: permissionError, ephemeral: true });
 
     if (commandName === 'kick') {
