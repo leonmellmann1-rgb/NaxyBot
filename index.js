@@ -193,10 +193,8 @@ const commands = [
     .addStringOption(o => o.setName('gewinn').setDescription('Was wird verlost?').setMaxLength(180).setRequired(true))
     .addStringOption(o => o.setName('beschreibung').setDescription('Zusätzliche Infos').setMaxLength(800)),
   new SlashCommandBuilder().setName('endgiveaway').setDescription('Beendet ein Giveaway sofort.')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addStringOption(o => o.setName('id').setDescription('Giveaway-ID').setRequired(true)),
   new SlashCommandBuilder().setName('reroll').setDescription('Zieht einen neuen Gewinner.')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addStringOption(o => o.setName('id').setDescription('Giveaway-ID').setRequired(true)),
   new SlashCommandBuilder().setName('welcome-setup').setDescription('Legt den Welcome-Kanal fest.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
@@ -418,7 +416,7 @@ client.on('interactionCreate', async i => {
         const guild = await client.guilds.fetch(g.guildId);
         const ch = await createClaim(guild, g, i.user);
         await disableWinnerDM(g, i.user, 'Gewinn beansprucht. Claim-Kanal: ' + ch.name);
-        await i.followUp({ content: 'Dein privater Claim-Kanal wurde erstellt: ' + ch.toString(), ephemeral: true }).catch(() => {});
+        await i.followUp({ content: 'Dein privater Claim-Kanal wurde erstellt: ' + ch.toString() }).catch(() => {});
         return;
       }
       if (action === 'gw_reroll_request') {
