@@ -315,7 +315,7 @@ client.on('interactionCreate', async i => {
       const n = i.commandName;
       if (n === 'ping') return i.reply({ content: 'Pong! API-Latenz: ' + client.ws.ping + ' ms', ephemeral: true });
       if (n === 'help') return i.reply({ embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('NAXY Helper')
-        .setDescription('**Moderation**\n/clear · /kick · /ban · /timeout · /untimeout\n\n**Giveaways**\n/giveaway-request · /endgiveaway · /reroll\n\n**Server**\n/welcome-setup · /rolepanel · /ticket-setup · /ticket-close · /serverinfo\n\n**Nachrichten**\n/say · /sayembed')], ephemeral: true });
+        .setDescription('**Moderation**\n/clear · /kick · /ban · /timeout · /untimeout\n\n**Giveaways**\n/giveaway-request · /endgiveaway · /reroll · /giveaway-manual-winner\n\n**Server**\n/welcome-setup · /rollenpanel · /ticket-setup · /ticket-close · /serverinfo\n\n**Nachrichten**\n/say · /sayembed')], ephemeral: true });
       if (!i.inGuild()) return i.reply({ content: 'Nur auf einem Server nutzbar.', ephemeral: true });
 
       if (n === 'serverinfo') return i.reply({ embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle(i.guild.name)
@@ -446,6 +446,10 @@ client.on('interactionCreate', async i => {
         if (n === 'endgiveaway') {
           if (g.status !== 'active') return i.reply({ content: 'Giveaway läuft nicht mehr.', ephemeral: true });
           g.status = 'drawing'; save();
+          if (g.manualWinners) {
+            g.status = 'awaiting_manual_winner'; save(); await updateGw(i.guild, g);
+            return i.reply({ content: 'Giveaway beendet. Das Team kann den Gewinner jetzt mit /giveaway-manual-winner festlegen.', ephemeral: true });
+          }
           await drawWinner(i.guild, g, 'Giveaway beendet.');
           return i.reply({ content: 'Giveaway beendet und Gewinner gezogen.', ephemeral: true });
         }
