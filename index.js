@@ -71,7 +71,6 @@ function parseDuration(input) {
   if (!count || value.replace(/\s/g, '') !== consumed) return null;
   return total;
 }
-}
 async function updateGw(guild, g) {
   const ch = await channelById(guild, g.channelId);
   const msg = ch && g.messageId ? await ch.messages.fetch(g.messageId).catch(() => null) : null;
