@@ -1,7 +1,7 @@
 {
-  "name": "naxybot-spawner-tracker",
+  "name": "naxy-helper",
   "version": "1.0.0",
-  "description": "Discord Spawner Ankauf Tracker",
+  "description": "NAXY Helper Discord Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
