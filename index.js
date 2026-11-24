@@ -145,11 +145,13 @@ async function drawWinner(guild, g, reason) {
 function scheduleGw(g) {
   if (g.status !== 'active') return;
   setTimeout(async () => {
+    if (g.status !== 'active') return;
+    if (Date.now() < g.endsAt) return scheduleGw(g);
     const guild = await client.guilds.fetch(g.guildId).catch(() => null);
     if (!guild || g.status !== 'active') return;
     g.status = 'drawing';
     save();
-    await drawWinner(guild, g, 'Vorheriger Gewinner ersetzt.');
+    await drawWinner(guild, g, 'Giveaway-Laufzeit beendet.');
   }, Math.max(0, Math.min(2147480000, g.endsAt - Date.now())));
 }
 async function createTicket(guild, user, subject, details) {
@@ -394,11 +396,10 @@ client.on('interactionCreate', async i => {
         if (g.participants.includes(i.user.id)) return i.reply({ content: 'Du bist bereits dabei. Zum Verlassen nutze die DM.', ephemeral: true });
         g.participants.push(i.user.id); save();
         await updateGw(i.guild, g);
-        await i.reply({ content: 'Du bist dabei! Ich schicke dir eine DM mit dem Button zum Verlassen.', ephemeral: true });
-        await i.user.send({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('Du bist dabei! 🎉')
+        const dmSent = await i.user.send({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('Du bist dabei! 🎉')
           .setDescription('Du nimmst an **' + g.prize + '** teil. Du kannst deine Teilnahme hier zurückziehen.')],
-          components: [new ActionRowBuilder().addComponents(button('gw_leave:' + key, 'Teilnahme verlassen', ButtonStyle.Danger))] }).catch(() => {});
-        return;
+          components: [new ActionRowBuilder().addComponents(button('gw_leave:' + key, 'Teilnahme verlassen', ButtonStyle.Danger))] }).then(() => true).catch(() => false);
+        return i.reply({ content: dmSent ? 'Du bist dabei! Deine private DM mit dem Button zum Verlassen wurde gesendet.' : 'Du bist dabei! Deine DMs sind geschlossen, deshalb kannst du nur hier teilnehmen.', ephemeral: true });
       }
       if (action === 'gw_leave') {
         const g = data.giveaways[key];
