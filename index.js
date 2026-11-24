@@ -181,6 +181,14 @@ function scheduleGw(g) {
     if (Date.now() < g.endsAt) return scheduleGw(g);
     const guild = await client.guilds.fetch(g.guildId).catch(() => null);
     if (!guild || g.status !== 'active') return;
+    if (g.manualWinners) {
+      g.status = 'awaiting_manual_winner'; save(); await updateGw(guild, g);
+      const review = await channelById(guild, TEAM_REVIEW_CHANNEL_ID);
+      if (review) await review.send('Giveaway **' + g.prize + '** ist beendet. Bitte lost manuell aus und legt den Gewinner mit /giveaway-manual-winner fest. ID: ' + g.id);
+      const channel = await channelById(guild, g.channelId);
+      if (channel) await channel.send('Das Giveaway ist beendet. Die Gewinnerauslosung übernimmt das Team.');
+      return;
+    }
     g.status = 'drawing';
     save();
     await drawWinner(guild, g, 'Giveaway-Laufzeit beendet.');
@@ -576,8 +584,9 @@ client.on('interactionCreate', async i => {
         const ch = await createClaim(guild, g, i.user);
         await disableWinnerDM(g, i.user, 'Gewinn angenommen. Claim-Kanal: ' + ch.name);
         g.winnerId = null; g.winnerDmMessageId = null; g.claimExpiresAt = null;
-        if (g.manualWinners) { g.status = 'awaiting_manual_winner'; }
-        else if (g.claimedWinners.length < (g.winnerCount || 1)) {
+        if (g.manualWinners) {
+          g.status = 'awaiting_manual_winner'; save(); await updateGw(guild, g);
+        } else if (g.claimedWinners.length < (g.winnerCount || 1)) {
           save();
           await drawWinner(guild, g, 'Der nächste Gewinner wird gezogen.');
         } else {
@@ -585,7 +594,7 @@ client.on('interactionCreate', async i => {
           save();
           await updateGw(guild, g);
           const publicChannel = await channelById(guild, g.channelId);
-          if (publicChannel) await publicChannel.send('🎉 Alle ' + g.claimedWinners.length + ' Gewinner haben ihren Gewinn beansprucht!');
+          if (publicChannel) await publicChannel.send('🎉 Alle ' + g.claimedWinners.length + ' Gewinner haben ihren Gewinn angenommen!');
         }
         await i.followUp({ content: 'Dein privater Claim-Kanal wurde erstellt: ' + ch.toString() }).catch(() => {});
         return;
