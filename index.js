@@ -227,10 +227,14 @@ const commands = [
   new SlashCommandBuilder().setName('welcome-setup').setDescription('Legt den Welcome-Kanal fest.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addChannelOption(o => o.setName('kanal').setDescription('Welcome-Kanal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
-  new SlashCommandBuilder().setName('rolepanel').setDescription('Erstellt ein Rollenpanel.')
+  new SlashCommandBuilder().setName('rollenpanel').setDescription('Erstellt ein Rollenpanel mit bis zu fünf auswählbaren Rollen.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
-    .addRoleOption(o => o.setName('rolle').setDescription('Rolle').setRequired(true))
-    .addStringOption(o => o.setName('text').setDescription('Button-Text').setMaxLength(70)),
+    .addRoleOption(o => o.setName('rolle1').setDescription('Erste Rolle').setRequired(true))
+    .addRoleOption(o => o.setName('rolle2').setDescription('Zweite Rolle (optional)'))
+    .addRoleOption(o => o.setName('rolle3').setDescription('Dritte Rolle (optional)'))
+    .addRoleOption(o => o.setName('rolle4').setDescription('Vierte Rolle (optional)'))
+    .addRoleOption(o => o.setName('rolle5').setDescription('Fünfte Rolle (optional)'))
+    .addStringOption(o => o.setName('text').setDescription('Beschreibung über den Buttons (optional)').setMaxLength(900)),
   new SlashCommandBuilder().setName('ticket-setup').setDescription('Erstellt das Support-Panel.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder().setName('ticket-close').setDescription('Schließt das Ticket in diesem Kanal.'),
@@ -438,14 +442,22 @@ client.on('interactionCreate', async i => {
         return i.reply({ content: 'Welcome-Kanal gesetzt: ' + ch.toString() + '. Der Server-Members-Intent muss im Developer Portal aktiviert sein.', ephemeral: true });
       }
 
-      if (n === 'rolepanel') {
-        const role = i.options.getRole('rolle', true);
-        if (role.managed || role.position >= i.guild.members.me.roles.highest.position) return i.reply({ content: 'Diese Rolle liegt über meiner Bot-Rolle oder ist verwaltet.', ephemeral: true });
-        const label = i.options.getString('text') || role.name;
-        await i.channel.send({ embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('Rollenpanel')
-          .setDescription('Klicke auf den Button, um **' + role.name + '** zu erhalten oder abzulegen.')],
-          components: [new ActionRowBuilder().addComponents(button('role_toggle:' + role.id, label, ButtonStyle.Primary))] });
-        return i.reply({ content: 'Rollenpanel erstellt.', ephemeral: true });
+      if (n === 'rollenpanel') {
+        const roles = [1, 2, 3, 4, 5].map(number => i.options.getRole('rolle' + number)).filter(Boolean);
+        if (!roles.length) return i.reply({ content: 'Wähle mindestens eine Rolle aus.', ephemeral: true });
+        const botMember = await i.guild.members.fetchMe();
+        const invalid = roles.find(role => role.managed || role.id === i.guild.id || role.position >= botMember.roles.highest.position);
+        if (invalid) return i.reply({ content: 'Die Rolle ' + invalid.name + ' liegt über meiner Bot-Rolle oder kann nicht vergeben werden.', ephemeral: true });
+        const uniqueRoles = [...new Map(roles.map(role => [role.id, role])).values()];
+        const description = i.options.getString('text') || 'Klicke auf einen Button, um die jeweilige Rolle zu erhalten. Beim erneuten Klicken wird sie wieder entfernt.';
+        const row = new ActionRowBuilder().addComponents(...uniqueRoles.map(role =>
+          button('role_toggle:' + role.id, role.name.slice(0, 80), ButtonStyle.Primary)
+        ));
+        await i.channel.send({
+          embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('Rollenpanel').setDescription(description)],
+          components: [row]
+        });
+        return i.reply({ content: 'Rollenpanel mit ' + uniqueRoles.length + ' Rolle(n) erstellt.', ephemeral: true });
       }
 
       if (n === 'ticket-setup') {
@@ -469,6 +481,24 @@ client.on('interactionCreate', async i => {
       const parts = i.customId.split(':');
       const action = parts[0];
       const key = parts[1];
+
+      if (action === 'role_toggle') {
+        const role = await i.guild.roles.fetch(key).catch(() => null);
+        if (!role || role.managed || role.id === i.guild.id) {
+          return i.reply({ content: 'Diese Rolle ist nicht mehr verfügbar.', ephemeral: true });
+        }
+        const member = await i.guild.members.fetch(i.user.id);
+        const botMember = await i.guild.members.fetchMe();
+        if (role.position >= botMember.roles.highest.position || !botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
+          return i.reply({ content: 'Der Bot darf diese Rolle nicht vergeben. Prüfe seine Rollenposition und Berechtigung „Rollen verwalten“.', ephemeral: true });
+        }
+        if (member.roles.cache.has(role.id)) {
+          await member.roles.remove(role, 'Rollenpanel: Mitglied hat Button erneut geklickt.');
+          return i.reply({ content: 'Rolle **' + role.name + '** wurde entfernt.', ephemeral: true });
+        }
+        await member.roles.add(role, 'Rollenpanel: Mitglied hat Button geklickt.');
+        return i.reply({ content: 'Du hast die Rolle **' + role.name + '** erhalten.', ephemeral: true });
+      }
 
       if (action === 'gw_approve') {
         const req = data.requests[key];
