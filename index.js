@@ -51,10 +51,26 @@ function gwEmbed(g) {
     .setDescription(g.description || 'Klicke auf Mitmachen, um teilzunehmen.')
     .addFields(
       { name: 'Teilnehmer', value: String(g.participants.length), inline: true },
-      { name: 'Gewinner', value: String((g.claimedWinners || []).length) + '/' + String(g.winnerCount || 1), inline: true },
+      { name: 'Gewinner', value: g.manualWinners ? 'Manuelle Auslosung' : String((g.claimedWinners || []).length) + '/' + String(g.winnerCount || 1), inline: true },
       { name: 'Endet', value: '<t:' + Math.floor(g.endsAt / 1000) + ':R>', inline: true },
       { name: 'Claim-Frist', value: g.claimMinutes + ' Minuten', inline: true }
     ).setFooter({ text: 'Giveaway-ID: ' + g.id });
+}
+function parseDuration(input) {
+  const value = String(input || '').trim().toUpperCase();
+  const re = /(\d+)\s*(MIN(?:UTE|UTEN)?|M|H(?:OUR|OURS|STUNDE|STUNDEN)?|D(?:AY|AYS|TAG|TAGE|TAGS)?)/g;
+  let match, total = 0, consumed = '', count = 0;
+  while ((match = re.exec(value)) !== null) {
+    const unit = match[2];
+    const multiplier = unit === 'M' || unit.startsWith('MIN') ? 1 :
+      (unit === 'H' || unit.startsWith('HOUR') || unit.startsWith('STUNDE') ? 60 : 1440);
+    total += Number(match[1]) * multiplier;
+    consumed += match[0].replace(/\s/g, '');
+    count++;
+  }
+  if (!count || value.replace(/\s/g, '') !== consumed) return null;
+  return total;
+}
 }
 async function updateGw(guild, g) {
   const ch = await channelById(guild, g.channelId);
@@ -99,73 +115,64 @@ async function disableWinnerDM(g, user, label) {
     components: [new ActionRowBuilder().addComponents(button('gw_claim:' + g.id, 'Abgeschlossen', ButtonStyle.Secondary).setDisabled(true))]
   }).catch(() => {});
 }
-async function drawWinner(guild, g, reason) {
-  // A winner who declines, requests a reroll, or misses the claim deadline is excluded.
-  if (g.winnerId && g.status === 'awaiting_claim') {
-    g.excluded ||= [];
-    if (!g.excluded.includes(g.winnerId)) g.excluded.push(g.winnerId);
-    const old = await client.users.fetch(g.winnerId).catch(() => null);
-    if (old) await disableWinnerDM(g, old, reason || 'Neuauslosung.');
-  }
-
-  g.claimedWinners ||= [];
-  g.excluded ||= [];
-  g.winnerCount = Math.max(1, Number(g.winnerCount) || 1);
-  g.winnerId = null;
-  g.winnerDmMessageId = null;
-  g.claimExpiresAt = null;
-
-  if (g.claimedWinners.length >= g.winnerCount) {
-    g.status = 'finished';
-    save();
-    await updateGw(guild, g);
-    const doneChannel = await channelById(guild, g.channelId);
-    if (doneChannel) await doneChannel.send('🎉 Alle ' + g.claimedWinners.length + ' Gewinner haben ihren Gewinn beansprucht!');
+async function sendWinnerOffer(guild, g, winnerId) {
+  g.winnerId = winnerId; g.status = 'awaiting_claim';
+  g.claimExpiresAt = Date.now() + g.claimMinutes * 60000; save(); await updateGw(guild, g);
+  const publicChannel = await channelById(guild, g.channelId);
+  if (publicChannel) await publicChannel.send('🎉 Glückwunsch <@' + winnerId + '>! Du hast **' + g.prize + '** gewonnen. Prüfe deine DMs.');
+  const user = await client.users.fetch(winnerId).catch(() => null);
+  const dm = user ? await user.send({
+    embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('Du hast gewonnen! 🎉')
+      .setDescription('Du hast **' + g.prize + '** gewonnen. Klicke auf „Annehmen“, wenn du deinen Preis möchtest. Du hast **' + g.claimMinutes + ' Minuten** Zeit.')
+      .setFooter({ text: 'Giveaway-ID: ' + g.id })],
+    components: [new ActionRowBuilder().addComponents(button('gw_claim:' + g.id, 'Annehmen', ButtonStyle.Success, '🎁'))]
+  }).catch(() => null) : null;
+  if (!dm) {
+    g.status = 'winner_dm_failed'; save();
+    const review = await channelById(guild, TEAM_REVIEW_CHANNEL_ID);
+    if (review) await review.send('Die Gewinn-DM für <@' + winnerId + '> konnte nicht zugestellt werden. Bitte prüft Giveaway ' + g.id + '.');
     return;
   }
-
-  const pool = g.participants.filter(uid =>
-    !g.excluded.includes(uid) && !g.claimedWinners.includes(uid)
-  );
+  g.winnerDmMessageId = dm.id; save();
+  setTimeout(async () => {
+    const freshGuild = await client.guilds.fetch(g.guildId).catch(() => null);
+    if (freshGuild && g.status === 'awaiting_claim' && g.winnerId === winnerId)
+      await requestTeamReroll(freshGuild, g, 'Die Annahmefrist ist abgelaufen.');
+  }, Math.max(0, Math.min(2147480000, g.claimExpiresAt - Date.now())));
+}
+async function requestTeamReroll(guild, g, reason) {
+  if (!g.winnerId || g.status !== 'awaiting_claim') return;
+  g.status = 'awaiting_team_decision'; g.rerollReason = reason; save();
+  const review = await channelById(guild, TEAM_REVIEW_CHANNEL_ID);
+  if (review) await review.send({
+    embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('Team-Entscheidung: Giveaway-Gewinner')
+      .setDescription('Gewinner: <@' + g.winnerId + '>\nGrund: ' + reason + '\nGiveaway-ID: ' + g.id + '\nSoll neu ausgelost werden?')],
+    components: [new ActionRowBuilder().addComponents(button('gw_reroll_ok:' + g.id, 'Neu auslosen', ButtonStyle.Danger), button('gw_reroll_no:' + g.id, 'Gewinner behalten', ButtonStyle.Success))]
+  });
+  else { g.status = 'awaiting_claim'; save(); }
+}
+async function drawWinner(guild, g, reason) {
+  g.claimedWinners ||= []; g.excluded ||= [];
+  if (g.winnerId && ['awaiting_claim','awaiting_team_decision'].includes(g.status)) {
+    if (!g.excluded.includes(g.winnerId)) g.excluded.push(g.winnerId);
+    const old = await client.users.fetch(g.winnerId).catch(() => null);
+    if (old) await disableWinnerDM(g, old, reason || 'Neuauslosung durch das Team.');
+  }
+  g.winnerId = null; g.winnerDmMessageId = null; g.claimExpiresAt = null;
+  if (g.claimedWinners.length >= g.winnerCount) {
+    g.status = 'finished'; save(); await updateGw(guild, g);
+    const done = await channelById(guild, g.channelId);
+    if (done) await done.send('🎉 Alle Gewinner haben ihren Preis angenommen!');
+    return;
+  }
+  const pool = g.participants.filter(uid => !g.excluded.includes(uid) && !g.claimedWinners.includes(uid));
   if (!pool.length) {
-    g.status = 'finished_no_winner';
-    save();
-    await updateGw(guild, g);
+    g.status = 'finished_no_winner'; save(); await updateGw(guild, g);
     const ch = await channelById(guild, g.channelId);
     if (ch) await ch.send('Giveaway beendet: Es gibt keine weiteren verfügbaren Teilnehmer.');
     return;
   }
-
-  const winnerId = pool[Math.floor(Math.random() * pool.length)];
-  g.winnerId = winnerId;
-  g.status = 'awaiting_claim';
-  g.claimExpiresAt = Date.now() + g.claimMinutes * 60000;
-  save();
-  await updateGw(guild, g);
-
-  const publicChannel = await channelById(guild, g.channelId);
-  if (publicChannel) await publicChannel.send('🎉 Glückwunsch <@' + winnerId + '>! Du hast **' + g.prize + '** gewonnen. Prüfe deine DMs.');
-
-  const user = await client.users.fetch(winnerId).catch(() => null);
-  if (!user) return drawWinner(guild, g, 'Der Gewinner konnte nicht erreicht werden.');
-  const dm = await user.send({
-    embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('Du hast gewonnen! 🎉')
-      .setDescription('Du hast **' + g.prize + '** gewonnen. Beanspruche ihn innerhalb von **' + g.claimMinutes + ' Minuten**. Danach wird automatisch neu ausgelost.')
-      .setFooter({ text: 'Giveaway-ID: ' + g.id })],
-    components: [new ActionRowBuilder().addComponents(
-      button('gw_claim:' + g.id, 'Gewinn beanspruchen', ButtonStyle.Success, '🎁'),
-      button('gw_reroll_request:' + g.id, 'Ablehnen / Neuauslosung anfragen', ButtonStyle.Secondary)
-    )]
-  }).catch(() => null);
-  if (!dm) return drawWinner(guild, g, 'Die DM konnte nicht zugestellt werden.');
-  g.winnerDmMessageId = dm.id;
-  save();
-  setTimeout(async () => {
-    const freshGuild = await client.guilds.fetch(g.guildId).catch(() => null);
-    if (freshGuild && g.status === 'awaiting_claim' && g.winnerId === winnerId) {
-      await drawWinner(freshGuild, g, 'Claim-Frist abgelaufen.');
-    }
-  }, Math.max(0, Math.min(2147480000, g.claimExpiresAt - Date.now())));
+  await sendWinnerOffer(guild, g, pool[Math.floor(Math.random() * pool.length)]);
 }
 function scheduleGw(g) {
   if (g.status !== 'active') return;
@@ -222,8 +229,12 @@ const commands = [
     .addChannelOption(o => o.setName('kanal').setDescription('Öffentlicher Giveaway-Kanal (optional)').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)),
   new SlashCommandBuilder().setName('endgiveaway').setDescription('Beendet ein Giveaway sofort.')
     .addStringOption(o => o.setName('id').setDescription('Giveaway-ID').setRequired(true)),
-  new SlashCommandBuilder().setName('reroll').setDescription('Zieht einen neuen Gewinner.')
+  new SlashCommandBuilder().setName('reroll').setDescription('Startet nach Teamentscheidung eine Neuauslosung.')
     .addStringOption(o => o.setName('id').setDescription('Giveaway-ID').setRequired(true)),
+  new SlashCommandBuilder().setName('giveaway-manual-winner').setDescription('Legt bei manueller Auslosung den Gewinner fest.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption(o => o.setName('id').setDescription('Giveaway-ID').setRequired(true))
+    .addUserOption(o => o.setName('mitglied').setDescription('Manuell ausgeloster Gewinner').setRequired(true)),
   new SlashCommandBuilder().setName('welcome-setup').setDescription('Legt den Welcome-Kanal fest.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addChannelOption(o => o.setName('kanal').setDescription('Welcome-Kanal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
@@ -436,6 +447,17 @@ client.on('interactionCreate', async i => {
         return i.reply({ content: 'Neuer Gewinner gezogen.', ephemeral: true });
       }
 
+      if (n === 'giveaway-manual-winner') {
+        if (!team(i)) return i.reply({ content: 'Nur das Team darf den Gewinner festlegen.', ephemeral: true });
+        const g = data.giveaways[i.options.getString('id', true)];
+        const user = i.options.getUser('mitglied', true);
+        if (!g || g.guildId !== i.guild.id || !g.manualWinners || g.status !== 'awaiting_manual_winner')
+          return i.reply({ content: 'Dieses Giveaway wartet nicht auf eine manuelle Auslosung.', ephemeral: true });
+        if (!g.participants.includes(user.id)) return i.reply({ content: 'Diese Person nimmt nicht am Giveaway teil.', ephemeral: true });
+        await sendWinnerOffer(i.guild, g, user.id);
+        return i.reply({ content: 'Gewinner ausgewählt. Die Person erhält eine DM mit dem Annehmen-Button.', ephemeral: true });
+      }
+
       if (n === 'welcome-setup') {
         const ch = i.options.getChannel('kanal', true);
         config(i.guild.id).welcomeChannelId = ch.id; save();
@@ -506,9 +528,9 @@ client.on('interactionCreate', async i => {
         if (!team(i)) return i.reply({ content: 'Nur das Team kann annehmen.', ephemeral: true });
         const modal = new ModalBuilder().setCustomId('gw_config:' + key).setTitle('Giveaway einstellen');
         modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Laufzeit in Minuten').setPlaceholder('z. B. 1440').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('claim').setLabel('Claim-Frist in Minuten').setPlaceholder('z. B. 60').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('winners').setLabel('Anzahl der Gewinner (1–1000)').setPlaceholder('z. B. 1 oder 25').setMinLength(1).setMaxLength(4).setStyle(TextInputStyle.Short).setRequired(true))
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Laufzeit (z. B. 10 MIN, 2 H, 1 D)').setPlaceholder('10 MIN oder 1 H 30 MIN').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('claim').setLabel('Zeit zum Annehmen (z. B. 2 H)').setPlaceholder('60 MIN').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('winners').setLabel('Gewinnerzahl (leer = manuell)').setPlaceholder('z. B. 1 oder leer lassen').setMaxLength(4).setStyle(TextInputStyle.Short).setRequired(false))
         );
         return i.showModal(modal);
       }
@@ -552,10 +574,10 @@ client.on('interactionCreate', async i => {
         await i.deferUpdate();
         const guild = await client.guilds.fetch(g.guildId);
         const ch = await createClaim(guild, g, i.user);
-        await disableWinnerDM(g, i.user, 'Gewinn beansprucht. Claim-Kanal: ' + ch.name);
-        g.winnerId = null;
-        g.winnerDmMessageId = null;
-        if (g.claimedWinners.length < (g.winnerCount || 1)) {
+        await disableWinnerDM(g, i.user, 'Gewinn angenommen. Claim-Kanal: ' + ch.name);
+        g.winnerId = null; g.winnerDmMessageId = null; g.claimExpiresAt = null;
+        if (g.manualWinners) { g.status = 'awaiting_manual_winner'; }
+        else if (g.claimedWinners.length < (g.winnerCount || 1)) {
           save();
           await drawWinner(guild, g, 'Der nächste Gewinner wird gezogen.');
         } else {
@@ -575,20 +597,21 @@ client.on('interactionCreate', async i => {
         }
         await i.deferUpdate();
         const guild = await client.guilds.fetch(g.guildId);
-        await drawWinner(guild, g, 'Der Gewinner hat den Gewinn in der DM abgelehnt.');
+        await requestTeamReroll(guild, g, 'Der Gewinner hat den Gewinn abgelehnt.');
         return;
       }
       if (action === 'gw_reroll_ok' || action === 'gw_reroll_no') {
         if (!team(i)) return i.reply({ content: 'Nur das Team darf entscheiden.', ephemeral: true });
         const g = data.giveaways[key];
-        if (!g || g.status !== 'awaiting_claim') return i.reply({ content: 'Giveaway ist nicht mehr offen.', ephemeral: true });
+        if (!g || g.status !== 'awaiting_team_decision') return i.reply({ content: 'Für dieses Giveaway ist gerade keine Teamentscheidung offen.', ephemeral: true });
         if (action === 'gw_reroll_ok') {
           await drawWinner(i.guild, g, 'Das Team hat die Neuauslosung bestätigt.');
           return i.update({ content: 'Neuauslosung durchgeführt.', components: [], embeds: [] });
         }
+        g.status = 'awaiting_claim'; save();
         const winner = await client.users.fetch(g.winnerId).catch(() => null);
-        if (winner) winner.send('Das Team hat entschieden, dass dein Gewinn bestehen bleibt. Du kannst ihn beanspruchen.').catch(() => {});
-        return i.update({ content: 'Gewinn bleibt bestehen.', components: [], embeds: [] });
+        if (winner) winner.send('Das Team hat entschieden, dass du Gewinner bleibst. Bitte klicke in deiner vorherigen DM auf „Annehmen“.').catch(() => {});
+        return i.update({ content: 'Der bisherige Gewinner bleibt bestehen.', components: [], embeds: [] });
       }
       if (action === 'claim_close') {
         const g = data.giveaways[key];
@@ -632,17 +655,19 @@ client.on('interactionCreate', async i => {
         const rid = i.customId.split(':')[1];
         const req = data.requests[rid];
         if (!req || req.status !== 'pending') return i.reply({ content: 'Anfrage nicht mehr offen.', ephemeral: true });
-        const duration = Number(i.fields.getTextInputValue('duration'));
-        const claimMinutes = Number(i.fields.getTextInputValue('claim'));
-        const winnerCount = Number(i.fields.getTextInputValue('winners'));
-        if (!Number.isInteger(duration) || duration < 1 || duration > 43200 || !Number.isInteger(claimMinutes) || claimMinutes < 1 || claimMinutes > 10080 || !Number.isInteger(winnerCount) || winnerCount < 1 || winnerCount > 1000) {
-          return i.reply({ content: 'Laufzeit: 1–43200 Minuten. Claim-Frist: 1–10080 Minuten. Gewinner: 1–1000.', ephemeral: true });
+        const duration = parseDuration(i.fields.getTextInputValue('duration'));
+        const claimMinutes = parseDuration(i.fields.getTextInputValue('claim'));
+        const winnerRaw = i.fields.getTextInputValue('winners').trim();
+        const winnerCount = winnerRaw ? Number(winnerRaw) : null;
+        if (!Number.isInteger(duration) || duration < 1 || duration > 43200 || !Number.isInteger(claimMinutes) || claimMinutes < 1 || claimMinutes > 10080 ||
+            (winnerRaw && (!Number.isInteger(winnerCount) || winnerCount < 1 || winnerCount > 1000))) {
+          return i.reply({ content: 'Laufzeit: 1 Minute bis 30 Tage. Annahmefrist: 1 Minute bis 7 Tage. Gewinnerzahl: 1–1000 oder leer lassen.', ephemeral: true });
         }
         const postChannel = await channelById(i.guild, req.publishChannelId) ||
           await channelById(i.guild, GIVEAWAY_CHANNEL_ID) || i.channel;
         const g = { id: rid, guildId: i.guild.id, prize: req.prize, description: req.description,
           creatorId: req.userId, channelId: postChannel.id, participants: [], excluded: [], claimedWinners: [],
-          winnerCount, status: 'active', endsAt: Date.now() + duration * 60000, claimMinutes };
+          winnerCount, manualWinners: !winnerRaw, status: 'active', endsAt: Date.now() + duration * 60000, claimMinutes };
         data.giveaways[rid] = g; req.status = 'approved'; save();
         const msg = await postChannel.send({ embeds: [gwEmbed(g)], components: [new ActionRowBuilder().addComponents(button('gw_join:' + rid, 'Mitmachen', ButtonStyle.Success, '🎉'))] });
         g.messageId = msg.id; save(); scheduleGw(g);
