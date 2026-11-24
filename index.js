@@ -240,7 +240,6 @@ const commands = [
   new SlashCommandBuilder().setName('reroll').setDescription('Startet nach Teamentscheidung eine Neuauslosung.')
     .addStringOption(o => o.setName('id').setDescription('Giveaway-ID').setRequired(true)),
   new SlashCommandBuilder().setName('giveaway-manual-winner').setDescription('Legt bei manueller Auslosung den Gewinner fest.')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addStringOption(o => o.setName('id').setDescription('Giveaway-ID').setRequired(true))
     .addUserOption(o => o.setName('mitglied').setDescription('Manuell ausgeloster Gewinner').setRequired(true)),
   new SlashCommandBuilder().setName('welcome-setup').setDescription('Legt den Welcome-Kanal fest.')
@@ -461,7 +460,7 @@ client.on('interactionCreate', async i => {
         const user = i.options.getUser('mitglied', true);
         if (!g || g.guildId !== i.guild.id || !g.manualWinners || g.status !== 'awaiting_manual_winner')
           return i.reply({ content: 'Dieses Giveaway wartet nicht auf eine manuelle Auslosung.', ephemeral: true });
-        if (!g.participants.includes(user.id)) return i.reply({ content: 'Diese Person nimmt nicht am Giveaway teil.', ephemeral: true });
+        if (!g.participants.includes(user.id) || (g.claimedWinners || []).includes(user.id) || (g.excluded || []).includes(user.id)) return i.reply({ content: 'Diese Person ist nicht mehr für dieses Giveaway verfügbar.', ephemeral: true });
         await sendWinnerOffer(i.guild, g, user.id);
         return i.reply({ content: 'Gewinner ausgewählt. Die Person erhält eine DM mit dem Annehmen-Button.', ephemeral: true });
       }
